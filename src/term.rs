@@ -1,0 +1,266 @@
+//! Terminal embutido: roda o `claude` num pseudo-terminal (ConPTY) e mantém
+//! a tela dele num emulador VT, para ser desenhada dentro do painel.
+
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+/// Ligado pela thread leitora quando chega saída nova de algum chat; o loop
+/// da interface redesenha na hora em vez de esperar o próximo ciclo.
+static DIRTY: AtomicBool = AtomicBool::new(false);
+
+pub fn take_dirty() -> bool {
+    DIRTY.swap(false, Ordering::Relaxed)
+}
+
+/// Linhas de histórico guardadas para rolar (Shift+PgUp).
+const SCROLLBACK: usize = 5000;
+
+pub struct Term {
+    /// Id da sessão do Claude Code que roda aqui.
+    pub key: String,
+    pub title: String,
+    pub parser: Arc<Mutex<vt100::Parser>>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    master: Box<dyn MasterPty + Send>,
+    child: Box<dyn Child + Send + Sync>,
+    pub rows: u16,
+    pub cols: u16,
+    /// Linhas roladas para cima (0 = fim).
+    pub scroll: usize,
+}
+
+impl Term {
+    pub fn spawn(key: String, title: String, cwd: &str, args: &[String], rows: u16, cols: u16) -> Result<Term, String> {
+        Self::spawn_program("claude", key, title, cwd, args, rows, cols)
+    }
+
+    pub fn pid(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
+    pub fn spawn_program(program: &str, key: String, title: String, cwd: &str, args: &[String], rows: u16, cols: u16) -> Result<Term, String> {
+        if !std::path::Path::new(cwd).is_dir() {
+            return Err(format!("diretório não existe: {cwd}"));
+        }
+        let (rows, cols) = (rows.max(5), cols.max(20));
+        let pair = native_pty_system()
+            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .map_err(|e| format!("não consegui criar o terminal: {e}"))?;
+        let mut cmd = CommandBuilder::new(program);
+        cmd.args(args);
+        cmd.cwd(cwd);
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        // Se o dashboard foi aberto de dentro de uma sessão do Claude, o chat
+        // não deve se comportar como filho dela (senão não salva a conversa).
+        cmd.env_remove("CLAUDE_CODE_CHILD_SESSION");
+        cmd.env_remove("CLAUDECODE");
+        let child = pair.slave.spawn_command(cmd).map_err(|e| format!("não consegui iniciar o claude: {e}"))?;
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| e.to_string())?));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK)));
+
+        let (p, w) = (parser.clone(), writer.clone());
+        let _ = std::thread::Builder::new().name("pty-reader".into()).spawn(move || {
+            let mut buf = [0u8; 8192];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let chunk = &buf[..n];
+                        // Perguntas que o console faz ao terminal e fica esperando.
+                        let has = |pat: &[u8]| chunk.windows(pat.len()).any(|x| x == pat);
+                        let mut reply: Vec<u8> = Vec::new();
+                        if has(b"\x1b[6n") {
+                            let pos = p.lock().unwrap().screen().cursor_position();
+                            reply.extend(format!("\x1b[{};{}R", pos.0 + 1, pos.1 + 1).bytes());
+                        }
+                        if has(b"\x1b[c") || has(b"\x1b[0c") {
+                            reply.extend(b"\x1b[?62;22c");
+                        }
+                        p.lock().unwrap().process(chunk);
+                        DIRTY.store(true, Ordering::Relaxed);
+                        if !reply.is_empty() {
+                            let mut w = w.lock().unwrap();
+                            let _ = w.write_all(&reply);
+                            let _ = w.flush();
+                        }
+                    }
+                }
+            }
+        });
+        Ok(Term { key, title, parser, writer, master: pair.master, child, rows, cols, scroll: 0 })
+    }
+
+    pub fn send(&mut self, bytes: &[u8]) {
+        self.scroll = 0;
+        let mut w = self.writer.lock().unwrap();
+        let _ = w.write_all(bytes);
+        let _ = w.flush();
+    }
+
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        let (rows, cols) = (rows.max(5), cols.max(20));
+        if (rows, cols) == (self.rows, self.cols) {
+            return;
+        }
+        if self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).is_ok() {
+            self.parser.lock().unwrap().set_size(rows, cols);
+            self.rows = rows;
+            self.cols = cols;
+        }
+    }
+
+    pub fn exited(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(Some(_)))
+    }
+
+    pub fn kill(&mut self) {
+        let _ = self.child.kill();
+    }
+
+    pub fn scroll_by(&mut self, delta: isize) {
+        self.scroll = (self.scroll as isize + delta).clamp(0, SCROLLBACK as isize) as usize;
+    }
+
+    /// Cola texto (com bracketed paste, se o programa pediu).
+    pub fn paste(&mut self, text: &str) {
+        let bracketed = self.parser.lock().unwrap().screen().bracketed_paste();
+        if bracketed {
+            self.send(format!("\x1b[200~{text}\x1b[201~").as_bytes());
+        } else {
+            self.send(text.as_bytes());
+        }
+    }
+
+    pub fn contents(&self) -> String {
+        self.parser.lock().unwrap().screen().contents()
+    }
+
+    /// Última linha com texto na tela (para dizer por que o processo saiu).
+    pub fn last_line(&self) -> String {
+        self.contents().lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string()
+    }
+}
+
+impl Drop for Term {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+/// Tecla -> bytes que um terminal mandaria para o programa.
+pub fn key_bytes(k: &KeyEvent) -> Option<Vec<u8>> {
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = k.modifiers.contains(KeyModifiers::ALT);
+    let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+    // xterm: 1 + shift(1) + alt(2) + ctrl(4)
+    let m = 1 + shift as u8 + 2 * alt as u8 + 4 * ctrl as u8;
+    let csi = |fin: char| if m > 1 { format!("\x1b[1;{m}{fin}") } else { format!("\x1b[{fin}") };
+    let tilde = |n: u8| if m > 1 { format!("\x1b[{n};{m}~") } else { format!("\x1b[{n}~") };
+    let s: String = match k.code {
+        KeyCode::Char(c) => {
+            let mut out = String::new();
+            if alt {
+                out.push('\x1b');
+            }
+            if ctrl {
+                let b = match c.to_ascii_lowercase() {
+                    c @ 'a'..='z' => c as u8 - b'a' + 1,
+                    ' ' | '@' | '2' => 0,
+                    '[' | '3' => 0x1b,
+                    '\\' | '4' => 0x1c,
+                    ']' | '5' => 0x1d,
+                    '^' | '6' => 0x1e,
+                    '_' | '7' | '/' => 0x1f,
+                    '8' | '?' => 0x7f,
+                    _ => return None,
+                };
+                out.push(b as char);
+            } else {
+                out.push(c);
+            }
+            out
+        }
+        // Ctrl+Enter (ou Alt+Enter) = quebra de linha no prompt do Claude Code.
+        KeyCode::Enter if ctrl || alt => "\x1b\r".into(),
+        KeyCode::Enter => "\r".into(),
+        KeyCode::Backspace if ctrl || alt => "\x1b\x7f".into(),
+        KeyCode::Backspace => "\x7f".into(),
+        KeyCode::Tab => "\t".into(),
+        KeyCode::BackTab => "\x1b[Z".into(),
+        KeyCode::Esc => "\x1b".into(),
+        KeyCode::Up => csi('A'),
+        KeyCode::Down => csi('B'),
+        KeyCode::Right => csi('C'),
+        KeyCode::Left => csi('D'),
+        KeyCode::Home => csi('H'),
+        KeyCode::End => csi('F'),
+        KeyCode::Insert => tilde(2),
+        KeyCode::Delete => tilde(3),
+        KeyCode::PageUp => tilde(5),
+        KeyCode::PageDown => tilde(6),
+        KeyCode::F(n @ 1..=4) => {
+            let fin = [b'P', b'Q', b'R', b'S'][n as usize - 1] as char;
+            if m > 1 { format!("\x1b[1;{m}{fin}") } else { format!("\x1bO{fin}") }
+        }
+        KeyCode::F(n @ 5..=12) => tilde([15, 17, 18, 19, 20, 21, 23, 24][n as usize - 5]),
+        _ => return None,
+    };
+    Some(s.into_bytes())
+}
+
+/// UUID v4 (o `claude --session-id` exige um UUID válido).
+pub fn new_uuid() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let r = || {
+        let mut h = RandomState::new().build_hasher();
+        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+        h.finish()
+    };
+    let (a, b) = (r(), r());
+    format!(
+        "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
+        (a >> 32) as u32,
+        (a >> 16) as u16,
+        a as u16 & 0x0fff,
+        (b >> 48) as u16 & 0x3fff | 0x8000,
+        b & 0xffff_ffff_ffff
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn k(code: KeyCode, m: KeyModifiers) -> Option<Vec<u8>> {
+        key_bytes(&KeyEvent::new(code, m))
+    }
+
+    #[test]
+    fn teclas_basicas() {
+        assert_eq!(k(KeyCode::Char('a'), KeyModifiers::NONE), Some(b"a".to_vec()));
+        assert_eq!(k(KeyCode::Char('ç'), KeyModifiers::NONE), Some("ç".as_bytes().to_vec()));
+        assert_eq!(k(KeyCode::Char('c'), KeyModifiers::CONTROL), Some(vec![3]));
+        assert_eq!(k(KeyCode::Enter, KeyModifiers::NONE), Some(b"\r".to_vec()));
+        assert_eq!(k(KeyCode::Enter, KeyModifiers::CONTROL), Some(b"\x1b\r".to_vec()));
+        assert_eq!(k(KeyCode::Up, KeyModifiers::NONE), Some(b"\x1b[A".to_vec()));
+        assert_eq!(k(KeyCode::Left, KeyModifiers::CONTROL), Some(b"\x1b[1;5D".to_vec()));
+        assert_eq!(k(KeyCode::BackTab, KeyModifiers::SHIFT), Some(b"\x1b[Z".to_vec()));
+        assert_eq!(k(KeyCode::F(5), KeyModifiers::NONE), Some(b"\x1b[15~".to_vec()));
+    }
+
+    #[test]
+    fn uuid_valido() {
+        let u = new_uuid();
+        assert_eq!(u.len(), 36);
+        assert_eq!(u.as_bytes()[14], b'4');
+        assert!(matches!(u.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
+        assert_ne!(u, new_uuid());
+    }
+}
