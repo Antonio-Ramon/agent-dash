@@ -17,7 +17,44 @@ em paralelo, quais shells e monitors estão em background e quantos tokens cada 
 │dom 08/11    99.2M ■■■■■■■■■■            ││                       ▃   ▆▆█▃▃     ██      ▄█▅▅█  ││
 ```
 
-> **Vai instalar no seu PC?** Siga o [guia de instalação e uso](INSTALL.md).
+## Instalação
+
+Precisa de Windows 10 ou 11, do Claude Code no PATH e do Rust. O passo a passo completo, com
+o que fazer em cada situação, está no [guia de instalação e uso](INSTALL.md). O resumo:
+
+**1. Confira qual Rust você tem.** Num PowerShell novo:
+
+```powershell
+where.exe cargo
+rustc -vV | Select-String host
+```
+
+Vá de cima para baixo e pare na primeira linha que bater:
+
+| O que aparece | O que fazer |
+|---|---|
+| `cargo` não encontrado | Instale o rustup com o toolchain GNU ([guia, 2.2](INSTALL.md#22-instalar-o-rustup-com-o-toolchain-gnu)) |
+| Primeiro `cargo` em `C:\Program Files\Rust ...` | Esse Rust veio do instalador MSI, não tem rustup e não compila sem o C++ do Visual Studio. Desinstale e instale o rustup ([guia, 2.3](INSTALL.md#23-rust-instalado-pelo-msi)) |
+| Primeiro `cargo` em `.cargo\bin` e `host: x86_64-pc-windows-msvc` | Troque para o GNU: `rustup default stable-x86_64-pc-windows-gnu` ([guia, 2.4](INSTALL.md#24-rustup-na-variante-msvc)) |
+| Primeiro `cargo` em `.cargo\bin` e `host: x86_64-pc-windows-gnu` | Pronto, siga para o passo 2 |
+
+**2. Compile e instale** pelo PowerShell (leva de 1 a 3 minutos):
+
+```powershell
+git clone https://github.com/Antonio-Ramon/agent-dash.git
+cd agent-dash
+cargo install --locked --path .
+```
+
+O `--locked` é obrigatório (o porquê está em [Compilar a partir do código](#compilar-a-partir-do-código)).
+
+**3. Confira** num terminal novo:
+
+```powershell
+agent-dash --dump
+```
+
+Deu erro? Veja os [problemas comuns](INSTALL.md#8-problemas-comuns).
 
 ## Rodar
 
@@ -87,7 +124,7 @@ e que nasceu entre a chamada da ferramenta e o resultado dela. Tasks do PowerShe
 script por variável de ambiente, então nelas só vale o horário. Se houver mais de um candidato,
 a ação é recusada em vez de arriscar o processo errado.
 
-Itens limpos (`d`) ficam em `%LOCALAPPDATA%gent-dash\hidden.json`; nada é apagado de `~/.claude`.
+Itens limpos (`d`) ficam em `%LOCALAPPDATA%\agent-dash\hidden.json`; nada é apagado de `~/.claude`.
 
 ## De onde vêm os dados
 
@@ -125,14 +162,18 @@ segundo plano (o cabeçalho mostra "lendo histórico N%").
   aparece como `◌ expirado`.
 - **Task órfã** (`?`): sem notificação de fim e a sessão dona já fechou.
 
-## Compilar
+## Compilar a partir do código
 
-Requer Rust (testado com 1.99, toolchain `x86_64-pc-windows-gnu`).
+Requer Rust 1.88 ou mais novo pelo rustup (testado com 1.99, toolchain `x86_64-pc-windows-gnu`).
+Para preparar o Rust, veja a seção [Instalação](#instalação).
 
 ```powershell
-cargo build --release
+cargo build --release              # gera target\release\agent-dash.exe
 cargo install --locked --path .   # instala em %USERPROFILE%\.cargo\bin
 ```
+
+Compile pelo PowerShell. No Git Bash, o toolchain MSVC encontra o `link` do próprio Git
+(um utilitário de arquivos) no lugar do linker da Microsoft e falha com `link: extra operand`.
 
 **Por que algumas dependências estão fixadas em versões antigas** (`chrono =0.4.39`,
 `dirs 5`, `parking_lot 0.12.3`/`parking_lot_core 0.9.10` no `Cargo.lock`): as versões novas usam
