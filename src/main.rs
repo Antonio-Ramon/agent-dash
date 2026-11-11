@@ -23,6 +23,7 @@ Uso:
   agent-dash --frame [LxA]    desenha as telas em memória e imprime (depuração)
   agent-dash --chat-test      abre um chat embutido, manda uma mensagem e imprime (depuração)
   agent-dash --version        mostra a versão
+  agent-dash --update         procura e instala uma versão mais nova, sem abrir a interface
   agent-dash --help           esta mensagem
 
 Lê ~/.claude (ou $CLAUDE_CONFIG_DIR). Dentro do dashboard, aperte ? para ver os atalhos.
@@ -46,6 +47,14 @@ fn main() -> anyhow::Result<()> {
         let exe = std::env::current_exe()?;
         update::install(std::path::Path::new(new), &exe, ver).map_err(|e| anyhow::anyhow!(e))?;
         println!("instalado em {}", exe.display());
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--update") {
+        // Mesma checagem feita ao abrir o dashboard, sem abrir a interface.
+        if let Some(code) = update::auto() {
+            std::process::exit(code);
+        }
+        println!("agent-dash {}: nenhuma atualização aplicada", update::VERSION);
         return Ok(());
     }
     if args.iter().any(|a| a == "--dump") {
