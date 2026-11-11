@@ -168,6 +168,7 @@ fn kv(k: &str, v: impl Into<String>) -> Line<'static> {
 // ---------- layout ----------
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    app.chat_rect = Rect::default();
     let [header, body, footer] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
     draw_header(f, header, app);
@@ -400,7 +401,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     }
     if app.chat_focus {
         let mut spans = vec![Span::styled(" CHAT ", Style::new().fg(Color::Black).bg(FOCUS).bold()), Span::raw(" ")];
-        spans.extend(key_line(&[("F12", "volta ao painel"), ("Shift+PgUp/PgDn", "rolar"), ("Ctrl+Enter", "nova linha")]).spans);
+        spans.extend(key_line(&[("F12", "volta ao painel"), ("Shift+PgUp/PgDn", "rolar"), ("arrastar", "copiar"), ("Ctrl+Enter", "nova linha")]).spans);
         spans.push(Span::styled("o teclado está indo para o Claude", Style::new().fg(DIM).italic()));
         f.render_widget(Line::from(spans), area);
         return;
@@ -726,6 +727,25 @@ fn draw_chat(f: &mut Frame, area: Rect, app: &mut App, key: Option<String>) {
     f.render_widget(tui_term::widget::PseudoTerminal::new(p.screen()), inner);
     p.set_scrollback(0);
     drop(p);
+    // Rolagem além do histórico não existe: guarda a real, que é a usada na seleção.
+    t.scroll = shown;
+    app.chat_rect = inner;
+    if let Some(sel) = app.chat_sel.as_ref().filter(|s| s.key == app.terms[i].key) {
+        let (a, b) = if sel.anchor <= sel.head { (sel.anchor, sel.head) } else { (sel.head, sel.anchor) };
+        let style = Style::new().fg(Color::White).bg(Color::Rgb(60, 95, 160));
+        let buf = f.buffer_mut();
+        for r in 0..inner.height {
+            let l = r as i64 - shown as i64;
+            if l < a.0 || l > b.0 {
+                continue;
+            }
+            let c0 = if l == a.0 { a.1 } else { 0 };
+            let c1 = if l == b.0 { b.1 } else { inner.width.saturating_sub(1) };
+            for c in c0..=c1.min(inner.width.saturating_sub(1)) {
+                buf[(inner.x + c, inner.y + r)].set_style(style);
+            }
+        }
+    }
     if shown > 0 {
         let tag = format!(" ↑ {shown} linhas acima do fim ");
         let w = tag.chars().count() as u16;
@@ -1196,6 +1216,7 @@ fn draw_help(f: &mut Frame) {
         k("Enter", "sessão: abrir/entrar no chat aqui (▣ = chat aberto)"),
         k("F12  Ctrl+]", "devolver o teclado ao painel (o chat segue rodando)"),
         k("Shift+PgUp/Dn", "rolar o chat"),
+        k("arrastar", "selecionar texto do chat e copiar (Ctrl+C copia de novo)"),
         k("Ctrl+Enter", "quebrar linha no chat"),
         Line::raw(""),
         sec("Filtros"),

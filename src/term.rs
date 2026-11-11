@@ -157,6 +157,42 @@ impl Drop for Term {
     }
 }
 
+/// Texto entre dois pontos da tela do chat, inclusive. Cada ponto é
+/// (linha, coluna), com a linha contada a partir do topo da tela atual:
+/// 0 é a primeira linha visível sem rolagem, negativos estão no histórico.
+/// Assim a seleção continua no mesmo texto quando o chat rola.
+pub fn text_between(p: &mut vt100::Parser, a: (i64, u16), b: (i64, u16)) -> String {
+    let (s, e) = if a <= b { (a, b) } else { (b, a) };
+    let (rows, cols) = p.screen().size();
+    let mut out = String::new();
+    for l in s.0..=e.0 {
+        // Rola o mínimo para a linha `l` ficar visível.
+        let sb = if l < 0 { (-l) as usize } else { 0 };
+        p.set_scrollback(sb);
+        if p.screen().scrollback() != sb {
+            continue; // já saiu do histórico
+        }
+        let r = (l + sb as i64) as u16;
+        if r >= rows {
+            continue;
+        }
+        let c0 = if l == s.0 { s.1.min(cols) } else { 0 };
+        let c1 = if l == e.0 { (e.1 + 1).min(cols) } else { cols };
+        let text = if c0 < c1 { p.screen().rows(c0, c1 - c0).nth(r as usize).unwrap_or_default() } else { String::new() };
+        if l != e.0 && p.screen().row_wrapped(r) {
+            // Linha longa quebrada pelo terminal: continua na próxima sem \n.
+            out.push_str(&text);
+        } else {
+            out.push_str(text.trim_end());
+            if l != e.0 {
+                out.push('\n');
+            }
+        }
+    }
+    p.set_scrollback(0);
+    out
+}
+
 /// AltGr no Windows chega como Ctrl+Alt com o caractere já resolvido pelo
 /// layout (ex.: ABNT2 AltGr+Q = `/`, AltGr+W = `?`, AltGr+E = `°`). Ctrl+Alt
 /// de verdade só faz sentido com letras ASCII, então qualquer outro caractere
@@ -280,6 +316,18 @@ mod tests {
         assert_eq!(k(KeyCode::Char('@'), altgr), Some(b"@".to_vec()));
         // Ctrl+Alt com letra continua sendo atalho (ESC + controle).
         assert_eq!(k(KeyCode::Char('a'), altgr), Some(b"\x1b\x01".to_vec()));
+    }
+
+    #[test]
+    fn selecao_pega_texto_do_historico() {
+        let mut p = vt100::Parser::new(3, 10, 100);
+        p.process(b"linha1\r\nlinha2\r\nlinha3\r\nlinha4\r\nlinha5");
+        // Tela: linha3..linha5; linha1 e linha2 estão no histórico (-2, -1).
+        assert_eq!(text_between(&mut p, (-2, 0), (0, 3)), "linha1\nlinha2\nlinh");
+        // Arrastar de baixo para cima dá o mesmo texto.
+        assert_eq!(text_between(&mut p, (0, 3), (-2, 0)), "linha1\nlinha2\nlinh");
+        assert_eq!(text_between(&mut p, (2, 2), (2, 9)), "nha5");
+        assert_eq!(p.screen().scrollback(), 0);
     }
 
     #[test]

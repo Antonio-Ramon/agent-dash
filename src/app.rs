@@ -10,7 +10,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::widgets::ListState;
 use regex::Regex;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::collections::HashSet;
@@ -90,6 +90,16 @@ pub struct LaunchForm {
 
 pub const LAUNCH_FIELDS: usize = 5;
 
+/// Seleção de texto feita com o mouse no chat embutido. Pontos em
+/// (linha, coluna) como em `term::text_between`.
+pub struct ChatSel {
+    pub key: String,
+    pub anchor: (i64, u16),
+    pub head: (i64, u16),
+    /// Botão ainda apertado.
+    pub dragging: bool,
+}
+
 impl LaunchForm {
     /// Repositórios que combinam com o texto digitado (o igual primeiro).
     pub fn suggestions<'a>(&self, repos: &'a [String]) -> Vec<&'a String> {
@@ -130,6 +140,9 @@ pub struct App {
     /// Onde cada painel foi desenhado por último (para saber o que está sob o mouse).
     pub rects: [Rect; 4],
     pub main_rect: Rect,
+    /// Área da tela do chat no último desenho (vazia se não há chat na tela).
+    pub chat_rect: Rect,
+    pub chat_sel: Option<ChatSel>,
     /// `a`: inclui sessões encerradas e agentes/tasks antigos (últimas 24h).
     pub show_all: bool,
     /// `f`: agentes/tasks só da sessão selecionada.
@@ -196,6 +209,8 @@ impl App {
             wheel: None,
             rects: [Rect::default(); 4],
             main_rect: Rect::default(),
+            chat_rect: Rect::default(),
+            chat_sel: None,
             show_all: false,
             only_selected: false,
             zoom: false,
@@ -649,6 +664,47 @@ impl App {
         let panel = Panel::ALL.into_iter().find(|p| self.rects[p.idx()].contains(pos));
         let in_main = self.main_rect.contains(pos);
         match m.kind {
+            // Arrastar dentro do chat seleciona texto; soltar copia.
+            MouseEventKind::Down(MouseButton::Left) if self.chat_rect.contains(pos) && self.shown_chat().is_some() => {
+                let i = self.shown_chat().unwrap();
+                let key = self.terms[i].key.clone();
+                if !self.chat_focus {
+                    // Clicar no chat entrega o teclado a ele.
+                    self.chat_key = Some(key.clone());
+                    self.chat_focus = true;
+                }
+                let pt = self.chat_point(i, m.column, m.row);
+                self.chat_sel = Some(ChatSel { key, anchor: pt, head: pt, dragging: true });
+                true
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(i) = self.chat_sel.as_ref().filter(|s| s.dragging).and_then(|s| self.term_idx(&s.key)) else {
+                    return false;
+                };
+                // Passou da borda: rola o chat para continuar selecionando.
+                let r = self.chat_rect;
+                if m.row < r.y {
+                    self.terms[i].scroll_by(1);
+                } else if m.row >= r.bottom() {
+                    self.terms[i].scroll_by(-1);
+                }
+                let pt = self.chat_point(i, m.column, m.row);
+                if let Some(s) = self.chat_sel.as_mut() {
+                    s.head = pt;
+                }
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let Some(s) = self.chat_sel.as_mut().filter(|s| s.dragging) else { return false };
+                s.dragging = false;
+                if s.anchor == s.head {
+                    // Clique simples: não seleciona nada.
+                    self.chat_sel = None;
+                } else {
+                    self.copy_chat_sel();
+                }
+                true
+            }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let down = m.kind == MouseEventKind::ScrollDown;
                 match panel {
@@ -684,6 +740,7 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 self.wheel = None;
+                self.chat_sel = None;
                 if let Some(p) = panel {
                     if self.panel_empty(p) {
                         return false;
@@ -707,6 +764,35 @@ impl App {
                 }
             }
             _ => false,
+        }
+    }
+
+    /// Posição do mouse -> ponto (linha, coluna) no texto do chat `i`,
+    /// presa à área da tela do chat.
+    fn chat_point(&self, i: usize, col: u16, row: u16) -> (i64, u16) {
+        let r = self.chat_rect;
+        let col = col.clamp(r.x, r.right().saturating_sub(1)) - r.x;
+        let row = row.clamp(r.y, r.bottom().saturating_sub(1)) - r.y;
+        (row as i64 - self.terms[i].scroll as i64, col)
+    }
+
+    /// Copia o texto selecionado no chat para a área de transferência.
+    fn copy_chat_sel(&mut self) {
+        let Some(s) = &self.chat_sel else { return };
+        let Some(i) = self.term_idx(&s.key) else { return };
+        let (a, b) = (s.anchor, s.head);
+        let text = {
+            let mut p = self.terms[i].parser.lock().unwrap();
+            term::text_between(&mut p, a, b)
+        };
+        if text.trim().is_empty() {
+            self.flash("nada selecionado");
+            return;
+        }
+        let n = text.lines().count();
+        match set_clipboard(&text) {
+            Ok(()) => self.flash(format!("{n} linha{} copiada{}", if n == 1 { "" } else { "s" }, if n == 1 { "" } else { "s" })),
+            Err(e) => self.flash(format!("falha ao copiar: {e}")),
         }
     }
 
@@ -869,6 +955,18 @@ impl App {
             self.chat_focus = false;
             return;
         }
+        // Com texto selecionado, Ctrl+C copia (em vez de interromper o Claude).
+        if self.chat_sel.as_ref().is_some_and(|s| !s.dragging)
+            && ctrl
+            && !term::is_altgr(&k)
+            && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('C'))
+        {
+            self.copy_chat_sel();
+            self.chat_sel = None;
+            return;
+        }
+        // Qualquer outra tecla desfaz a seleção.
+        self.chat_sel = None;
         let Some(i) = self.chat_key.as_ref().and_then(|key| self.term_idx(key)) else {
             self.chat_focus = false;
             return;
@@ -1241,14 +1339,73 @@ fn read_tail(path: &Path, len: u64) -> std::io::Result<Vec<String>> {
     Ok(lines)
 }
 
-fn set_clipboard(text: &str) -> std::io::Result<()> {
-    let mut child = Command::new("clip").stdin(Stdio::piped()).stdout(Stdio::null()).spawn()?;
-    // clip.exe entende UTF-16LE com BOM; assim acentos chegam certos.
-    let mut bytes = vec![0xFF, 0xFE];
-    for u in text.encode_utf16() {
-        bytes.extend_from_slice(&u.to_le_bytes());
+/// Grava texto na área de transferência do Windows (CF_UNICODETEXT).
+///
+/// Direto pela API: o `clip.exe` não serve. Com BOM, o BOM (U+FEFF) entra
+/// no texto colado; sem BOM, textos curtos com acento viram lixo.
+#[cfg(windows)]
+pub fn set_clipboard(text: &str) -> std::io::Result<()> {
+    use std::ffi::c_void;
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn OpenClipboard(owner: *mut c_void) -> i32;
+        fn EmptyClipboard() -> i32;
+        fn SetClipboardData(format: u32, mem: *mut c_void) -> *mut c_void;
+        fn CloseClipboard() -> i32;
     }
-    child.stdin.take().unwrap().write_all(&bytes)?;
-    child.wait()?;
-    Ok(())
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalAlloc(flags: u32, bytes: usize) -> *mut c_void;
+        fn GlobalLock(mem: *mut c_void) -> *mut c_void;
+        fn GlobalUnlock(mem: *mut c_void) -> i32;
+        fn GlobalFree(mem: *mut c_void) -> *mut c_void;
+    }
+    const CF_UNICODETEXT: u32 = 13;
+    const GMEM_MOVEABLE: u32 = 0x0002;
+    let err = |what: &str| std::io::Error::new(std::io::ErrorKind::Other, format!("{what}: {}", std::io::Error::last_os_error()));
+    // Quebras de linha no padrão do Windows, terminado em NUL.
+    let wide: Vec<u16> = text.replace("\r\n", "\n").replace('\n', "\r\n").encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        // Outro programa pode estar com a área de transferência aberta: tenta algumas vezes.
+        let mut opened = false;
+        for _ in 0..10 {
+            if OpenClipboard(std::ptr::null_mut()) != 0 {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !opened {
+            return Err(err("área de transferência ocupada"));
+        }
+        let result = (|| {
+            if EmptyClipboard() == 0 {
+                return Err(err("EmptyClipboard"));
+            }
+            let mem = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2);
+            if mem.is_null() {
+                return Err(err("GlobalAlloc"));
+            }
+            let dst = GlobalLock(mem) as *mut u16;
+            if dst.is_null() {
+                GlobalFree(mem);
+                return Err(err("GlobalLock"));
+            }
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), dst, wide.len());
+            GlobalUnlock(mem);
+            // Deu certo: a memória passa a ser do sistema.
+            if SetClipboardData(CF_UNICODETEXT, mem).is_null() {
+                GlobalFree(mem);
+                return Err(err("SetClipboardData"));
+            }
+            Ok(())
+        })();
+        CloseClipboard();
+        result
+    }
+}
+
+#[cfg(not(windows))]
+pub fn set_clipboard(_text: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "área de transferência só no Windows"))
 }

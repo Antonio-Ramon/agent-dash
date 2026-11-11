@@ -7,7 +7,7 @@ mod term;
 mod ui;
 mod update;
 
-use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind};
+use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseButton, MouseEventKind};
 use ratatui::crossterm::execute;
 use std::sync::mpsc;
 use std::thread;
@@ -227,7 +227,10 @@ fn run_tui() -> anyhow::Result<()> {
                     match event::read()? {
                         Event::Key(k) if k.kind != KeyEventKind::Release => keys.push(k),
                         // Movimento chega aos montes e não muda nada: ignora sem redesenhar.
-                        Event::Mouse(m) if !matches!(m.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)) => mouse.push(m),
+                        // Arrastar com o botão esquerdo seleciona texto no chat.
+                        Event::Mouse(m) if !matches!(m.kind, MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Right | MouseButton::Middle)) => {
+                            mouse.push(m)
+                        }
                         Event::Resize(..) => need_draw = true,
                         _ => {}
                     }

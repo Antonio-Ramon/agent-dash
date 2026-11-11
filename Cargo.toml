@@ -1,6 +1,6 @@
 [package]
 name = "agent-dash"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "Dashboard TUI (estilo lazygit) para monitorar sessões, agentes, shells e consumo de tokens do Claude Code"
 
