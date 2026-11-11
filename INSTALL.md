@@ -196,6 +196,7 @@ atualizado. Não precisa de Rust nem do repositório para isso.
 
 - Sem internet (ou se o download falhar), ele abre na versão instalada, sem reclamar.
 - `agent-dash --version` mostra a versão; ela também aparece no título da ajuda (`?`).
+- `agent-dash --update` faz a mesma checagem sem abrir a interface.
 - Para desligar a atualização automática, defina a variável de ambiente `AGENT_DASH_NO_UPDATE=1`.
 - O executável anterior fica como `agent-dash.old.exe` ao lado do novo e é apagado na abertura seguinte.
 
