@@ -153,8 +153,20 @@ impl Drop for Term {
     }
 }
 
+/// AltGr no Windows chega como Ctrl+Alt com o caractere já resolvido pelo
+/// layout (ex.: ABNT2 AltGr+Q = `/`, AltGr+W = `?`, AltGr+E = `°`). Ctrl+Alt
+/// de verdade só faz sentido com letras ASCII, então qualquer outro caractere
+/// com os dois modificadores é tratado como texto digitado.
+pub fn is_altgr(k: &KeyEvent) -> bool {
+    let ctrl_alt = k.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT);
+    matches!(k.code, KeyCode::Char(c) if ctrl_alt && !c.is_ascii_alphabetic())
+}
+
 /// Tecla -> bytes que um terminal mandaria para o programa.
 pub fn key_bytes(k: &KeyEvent) -> Option<Vec<u8>> {
+    if let (true, KeyCode::Char(c)) = (is_altgr(k), k.code) {
+        return Some(c.to_string().into_bytes());
+    }
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     let alt = k.modifiers.contains(KeyModifiers::ALT);
     let shift = k.modifiers.contains(KeyModifiers::SHIFT);
@@ -253,6 +265,17 @@ mod tests {
         assert_eq!(k(KeyCode::Left, KeyModifiers::CONTROL), Some(b"\x1b[1;5D".to_vec()));
         assert_eq!(k(KeyCode::BackTab, KeyModifiers::SHIFT), Some(b"\x1b[Z".to_vec()));
         assert_eq!(k(KeyCode::F(5), KeyModifiers::NONE), Some(b"\x1b[15~".to_vec()));
+    }
+
+    #[test]
+    fn altgr_vira_texto() {
+        let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        assert_eq!(k(KeyCode::Char('/'), altgr), Some(b"/".to_vec()));
+        assert_eq!(k(KeyCode::Char('?'), altgr), Some(b"?".to_vec()));
+        assert_eq!(k(KeyCode::Char('°'), altgr), Some("°".as_bytes().to_vec()));
+        assert_eq!(k(KeyCode::Char('@'), altgr), Some(b"@".to_vec()));
+        // Ctrl+Alt com letra continua sendo atalho (ESC + controle).
+        assert_eq!(k(KeyCode::Char('a'), altgr), Some(b"\x1b\x01".to_vec()));
     }
 
     #[test]
