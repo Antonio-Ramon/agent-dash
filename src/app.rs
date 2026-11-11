@@ -638,7 +638,8 @@ impl App {
     fn chat_key_event(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
-        let leave = matches!(k.code, KeyCode::F(12)) || (ctrl && matches!(k.code, KeyCode::Char(']') | KeyCode::Char('5')));
+        let leave = matches!(k.code, KeyCode::F(12))
+            || (ctrl && !term::is_altgr(&k) && matches!(k.code, KeyCode::Char(']') | KeyCode::Char('5')));
         if leave {
             self.chat_focus = false;
             return;
@@ -927,7 +928,7 @@ impl App {
                 }
                 f.sug = 0;
             }
-            KeyCode::Char(c) if !ctrl => {
+            KeyCode::Char(c) if !ctrl || term::is_altgr(&k) => {
                 if let Some(t) = text_field(f) {
                     t.push(c);
                 }
