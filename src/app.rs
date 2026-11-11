@@ -5,7 +5,8 @@ use crate::collector::Ctl;
 use crate::model::*;
 use crate::term::{self, Term};
 use chrono::{Local, NaiveDate};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::{Position, Rect};
 use ratatui::widgets::ListState;
 use regex::Regex;
 use std::fs::File;
@@ -60,6 +61,17 @@ pub struct Confirm {
     pub quit: bool,
     /// Itens a limpar da lista se a ação for confirmada.
     pub hide: Vec<String>,
+    /// Chats a reabrir se confirmado (pergunta feita ao abrir o dashboard).
+    pub restore: Vec<SavedChat>,
+}
+
+/// Chat embutido que estava aberto; fica em disco enquanto o chat existir,
+/// para ser oferecido de volta se o dashboard fechar com ele aberto.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct SavedChat {
+    pub session_id: String,
+    pub title: String,
+    pub cwd: String,
 }
 
 /// Formulário "nova instância".
@@ -105,6 +117,19 @@ pub struct App {
     pub focus: Panel,
     pub states: [ListState; 4],
     sel_keys: [Option<String>; 4],
+    /// Primeira linha visível de cada lista da esquerda. A roda do mouse mexe
+    /// só aqui; a seleção fica onde está.
+    pub offsets: [usize; 4],
+    /// Pedido para o próximo desenho rolar a lista até o item selecionado.
+    pub reveal: [bool; 4],
+    /// O item selecionado estava na tela no último desenho. Se estava, a lista
+    /// o acompanha quando reordena; se a roda o tirou de vista, fica como está.
+    pub sel_visible: [bool; 4],
+    /// Último painel rolado pela roda: mostra a barra mesmo sem foco.
+    pub wheel: Option<Panel>,
+    /// Onde cada painel foi desenhado por último (para saber o que está sob o mouse).
+    pub rects: [Rect; 4],
+    pub main_rect: Rect,
     /// `a`: inclui sessões encerradas e agentes/tasks antigos (últimas 24h).
     pub show_all: bool,
     /// `f`: agentes/tasks só da sessão selecionada.
@@ -137,6 +162,10 @@ fn hidden_path() -> Option<PathBuf> {
     dirs::data_local_dir().map(|d| d.join("agent-dash").join("hidden.json"))
 }
 
+fn open_chats_path() -> Option<PathBuf> {
+    dirs::data_local_dir().map(|d| d.join("agent-dash").join("open_chats.json"))
+}
+
 fn load_hidden() -> HashSet<String> {
     hidden_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
@@ -161,6 +190,12 @@ impl App {
             focus: Panel::Sessions,
             states: Default::default(),
             sel_keys: Default::default(),
+            offsets: [0; 4],
+            reveal: [true; 4],
+            sel_visible: [true; 4],
+            wheel: None,
+            rects: [Rect::default(); 4],
+            main_rect: Rect::default(),
             show_all: false,
             only_selected: false,
             zoom: false,
@@ -179,6 +214,78 @@ impl App {
             chat_size: (30, 100),
             hidden: load_hidden(),
             last_hidden: Vec::new(),
+        }
+    }
+
+    /// Grava quais chats embutidos estão abertos agora. É chamado a cada
+    /// mudança (e não só ao sair), para valer também quando a janela do
+    /// terminal é fechada ou o processo é morto.
+    fn save_open_chats(&self) {
+        let Some(p) = open_chats_path() else { return };
+        let v: Vec<SavedChat> = self
+            .terms
+            .iter()
+            .filter(|t| t.restorable)
+            .map(|t| SavedChat { session_id: t.key.clone(), title: t.title.clone(), cwd: t.cwd.clone() })
+            .collect();
+        if v.is_empty() {
+            let _ = std::fs::remove_file(p);
+            return;
+        }
+        let _ = std::fs::create_dir_all(p.parent().unwrap());
+        if let Ok(t) = serde_json::to_string_pretty(&v) {
+            let _ = std::fs::write(p, t);
+        }
+    }
+
+    /// Ao abrir: se da última vez o dashboard fechou com chats abertos,
+    /// pergunta se é para reabri-los.
+    pub fn offer_restore(&mut self) {
+        let saved: Vec<SavedChat> = open_chats_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        if saved.is_empty() {
+            return;
+        }
+        let n = saved.len();
+        let mut body: Vec<String> = saved.iter().map(|c| format!("• {} — {}", c.title, c.cwd)).collect();
+        body.push("Estavam abertas aqui quando o dashboard fechou da última vez.".into());
+        body.push("y retoma cada conversa de onde parou; n descarta esta lista.".into());
+        self.confirm = Some(Confirm {
+            title: if n == 1 { "Reabrir a sessão que ficou aberta".into() } else { format!("Reabrir as {n} sessões que ficaram abertas") },
+            body,
+            action: None,
+            quit: false,
+            hide: Vec::new(),
+            restore: saved,
+        });
+    }
+
+    fn restore_chats(&mut self, saved: &[SavedChat]) {
+        let before = self.terms.len();
+        let mut failed = Vec::new();
+        for c in saved {
+            // Ainda rodando em algum lugar (outra aba, outro dashboard): retomar
+            // poria dois processos na mesma conversa.
+            if self.snap.sessions.iter().any(|s| s.session_id == c.session_id && s.alive) {
+                failed.push(format!("{} (ainda está rodando)", c.title));
+                continue;
+            }
+            let n = self.terms.len();
+            self.spawn_chat(c.session_id.clone(), c.title.clone(), &c.cwd, &["--resume".to_string(), c.session_id.clone()]);
+            if self.terms.len() == n {
+                failed.push(c.title.clone());
+            }
+        }
+        // Reabrir não toma o teclado: Enter entra no chat que interessar.
+        self.chat_focus = false;
+        self.save_open_chats();
+        let ok = self.terms.len() - before;
+        if failed.is_empty() {
+            self.flash(format!("{ok} sessão(ões) reaberta(s) · Enter entra no chat"));
+        } else {
+            self.flash(format!("{ok} reaberta(s); não consegui reabrir: {}", failed.join(", ")));
         }
     }
 
@@ -272,11 +379,13 @@ impl App {
         for p in Panel::ALL {
             let keys = self.keys(p);
             let i = p.idx();
+            let mut reveal = false;
             // Uma sessão nova leva um instante para aparecer; quando aparece, vira a seleção.
             if p == Panel::Sessions
                 && let Some(k) = &self.pending_sel
                 && keys.contains(k) {
                     self.sel_keys[i] = self.pending_sel.take();
+                    reveal = true;
                 }
             if keys.is_empty() {
                 self.states[i].select(None);
@@ -286,7 +395,15 @@ impl App {
             let idx = by_key.or_else(|| self.states[i].selected().map(|s| s.min(keys.len() - 1))).unwrap_or(0);
             self.states[i].select(Some(idx));
             self.sel_keys[i] = Some(keys[idx].clone());
+            if reveal || self.sel_visible[i] {
+                self.reveal[i] = true;
+            }
         }
+    }
+
+    /// Linhas de lista que cabem no painel `p` (sem a moldura).
+    fn list_height(&self, p: Panel) -> usize {
+        self.rects[p.idx()].height.saturating_sub(2) as usize
     }
 
     pub fn set_snapshot(&mut self, s: Snapshot) {
@@ -315,6 +432,7 @@ impl App {
                 }
             }
             self.terms[i].key = new;
+            self.save_open_chats();
         }
     }
 
@@ -326,8 +444,18 @@ impl App {
         }
         let cur = self.states[p.idx()].selected().unwrap_or(0) as isize;
         let next = (cur + delta).clamp(0, keys.len() as isize - 1) as usize;
+        self.select_idx(p, next);
+    }
+
+    /// Seleciona o item `next` do painel em foco `p`.
+    fn select_idx(&mut self, p: Panel, next: usize) {
+        let keys = self.keys(p);
+        if next >= keys.len() {
+            return;
+        }
         self.states[p.idx()].select(Some(next));
         self.sel_keys[p.idx()] = Some(keys[next].clone());
+        self.reveal[p.idx()] = true;
         self.scroll = 0;
         if p == Panel::Sessions {
             // Sessão com chat aberto aqui mostra o chat; as outras, o resumo.
@@ -349,11 +477,6 @@ impl App {
             Panel::Tasks => self.tasks().is_empty(),
             _ => false,
         }
-    }
-
-    /// Agentes e Tasks só aparecem quando têm algo (ou enquanto estão em foco).
-    pub fn panel_visible(&self, p: Panel) -> bool {
-        self.focus == p || !self.panel_empty(p)
     }
 
     fn go_panel(&mut self, p: Panel) {
@@ -399,10 +522,15 @@ impl App {
     // ---------- teclas ----------
 
     pub fn on_key(&mut self, k: KeyEvent, ctl: &Sender<Ctl>) {
+        self.wheel = None;
         if self.confirm.is_some() {
             match k.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Enter => {
                     let c = self.confirm.take().unwrap();
+                    if !c.restore.is_empty() {
+                        self.restore_chats(&c.restore);
+                        return;
+                    }
                     if c.quit {
                         self.quit = true;
                         return;
@@ -419,8 +547,14 @@ impl App {
                     }
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => {
-                    self.confirm = None;
-                    self.flash("cancelado");
+                    let c = self.confirm.take().unwrap();
+                    if c.restore.is_empty() {
+                        self.flash("cancelado");
+                    } else {
+                        // Recusou: esquece a lista (grava a atual, vazia).
+                        self.save_open_chats();
+                        self.flash("sessões não reabertas · a mostra as encerradas, Enter retoma uma delas");
+                    }
                 }
                 _ => {}
             }
@@ -500,6 +634,95 @@ impl App {
             KeyCode::Char('n') => self.open_launcher(),
             KeyCode::Char('?') => self.help = true,
             _ => {}
+        }
+    }
+
+    // ---------- mouse ----------
+
+    /// Roda: rola o que está sob o cursor, sem mudar foco nem seleção.
+    /// Clique: dá foco ao painel e seleciona a linha. Devolve se é preciso redesenhar.
+    pub fn on_mouse(&mut self, m: MouseEvent) -> bool {
+        if self.confirm.is_some() || self.launcher.is_some() || self.help {
+            return false;
+        }
+        let pos = Position::new(m.column, m.row);
+        let panel = Panel::ALL.into_iter().find(|p| self.rects[p.idx()].contains(pos));
+        let in_main = self.main_rect.contains(pos);
+        match m.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let down = m.kind == MouseEventKind::ScrollDown;
+                match panel {
+                    Some(Panel::Usage) => {
+                        // O gráfico de dias só mostra a janela em volta do dia selecionado.
+                        let keys = self.keys(Panel::Usage);
+                        if keys.is_empty() {
+                            return false;
+                        }
+                        let cur = self.states[3].selected().unwrap_or(0);
+                        let next = if down { (cur + 1).min(keys.len() - 1) } else { cur.saturating_sub(1) };
+                        self.states[3].select(Some(next));
+                        self.sel_keys[3] = Some(keys[next].clone());
+                    }
+                    Some(p) => {
+                        let i = p.idx();
+                        let max = self.keys(p).len().saturating_sub(self.list_height(p));
+                        self.offsets[i] = if down { (self.offsets[i] + 3).min(max) } else { self.offsets[i].saturating_sub(3) };
+                        // A roda manda na vista: nada de puxar de volta para a seleção.
+                        let (off, h) = (self.offsets[i], self.list_height(p));
+                        self.reveal[i] = false;
+                        self.sel_visible[i] = self.states[i].selected().is_some_and(|s| s >= off && s < off + h);
+                        self.wheel = Some(p);
+                    }
+                    None if in_main => match self.shown_chat() {
+                        Some(i) => self.terms[i].scroll_by(if down { -3 } else { 3 }),
+                        None if self.showing_chat() => {}
+                        None => self.scroll_main(if down { 3 } else { -3 }),
+                    },
+                    None => return false,
+                }
+                true
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.wheel = None;
+                if let Some(p) = panel {
+                    if self.panel_empty(p) {
+                        return false;
+                    }
+                    self.chat_focus = false;
+                    self.set_focus(p);
+                    let r = self.rects[p.idx()];
+                    let inside = m.row > r.y && m.row + 1 < r.bottom();
+                    if p != Panel::Usage && inside {
+                        let idx = (m.row - r.y - 1) as usize + self.offsets[p.idx()];
+                        self.select_idx(p, idx);
+                    }
+                    true
+                } else if in_main && !self.chat_focus && self.shown_chat().is_some() {
+                    // Clicar no chat entrega o teclado a ele.
+                    self.chat_key = self.selected_session().map(|s| s.session_id.clone());
+                    self.chat_focus = true;
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// O painel principal está na aba de chat?
+    fn showing_chat(&self) -> bool {
+        self.chat_focus || (self.focus == Panel::Sessions && self.tab == 3)
+    }
+
+    /// Índice do chat embutido que está na tela, se houver.
+    fn shown_chat(&self) -> Option<usize> {
+        if self.chat_focus {
+            self.chat_key.as_ref().and_then(|k| self.term_idx(k))
+        } else if self.focus == Panel::Sessions && self.tab == 3 {
+            self.selected_session().and_then(|s| self.term_idx(&s.session_id))
+        } else {
+            None
         }
     }
 
@@ -591,8 +814,10 @@ impl App {
 
     fn spawn_chat(&mut self, key: String, title: String, cwd: &str, args: &[String]) {
         match Term::spawn(key.clone(), title.clone(), cwd, args, self.chat_size.0, self.chat_size.1) {
-            Ok(t) => {
+            Ok(mut t) => {
+                t.restorable = args.first().map(String::as_str) != Some("attach");
                 self.terms.push(t);
+                self.save_open_chats();
                 self.focus = Panel::Sessions;
                 self.tab = 3;
                 self.sel_keys[0] = Some(key.clone());
@@ -682,6 +907,7 @@ impl App {
         while i < self.terms.len() {
             if self.terms[i].exited() {
                 let t = self.terms.remove(i);
+                self.save_open_chats();
                 if self.pending_sel.as_deref() == Some(&t.key) {
                     self.pending_sel = None;
                 }
@@ -708,20 +934,21 @@ impl App {
         let n = self.terms.len();
         let mut body: Vec<String> = self.terms.iter().map(|t| format!("• {}", t.title)).collect();
         body.push("Os chats abertos aqui dentro fecham junto com o dashboard.".into());
-        body.push("As conversas ficam salvas e podem ser retomadas depois.".into());
+        body.push("As conversas ficam salvas; ao abrir o dashboard de novo ele oferece reabri-las.".into());
         self.confirm = Some(Confirm {
             title: format!("Sair e fechar {n} chat{}", if n == 1 { "" } else { "s" }),
             body,
             action: None,
             quit: true,
             hide: Vec::new(),
+            restore: Vec::new(),
         });
     }
 
     // ---------- ações ----------
 
     fn ask(&mut self, title: impl Into<String>, body: Vec<String>, action: Action) {
-        self.confirm = Some(Confirm { title: title.into(), body, action: Some(action), quit: false, hide: Vec::new() });
+        self.confirm = Some(Confirm { title: title.into(), body, action: Some(action), quit: false, hide: Vec::new(), restore: Vec::new() });
     }
 
     /// `x`: parar a task / encerrar a sessão selecionada (sempre com confirmação).

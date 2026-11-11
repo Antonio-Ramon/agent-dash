@@ -22,6 +22,10 @@ pub struct Term {
     /// Id da sessão do Claude Code que roda aqui.
     pub key: String,
     pub title: String,
+    /// Diretório onde o `claude` foi iniciado.
+    pub cwd: String,
+    /// false = attach numa sessão em background, que segue viva sem o dashboard.
+    pub restorable: bool,
     pub parser: Arc<Mutex<vt100::Parser>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
@@ -93,7 +97,7 @@ impl Term {
                 }
             }
         });
-        Ok(Term { key, title, parser, writer, master: pair.master, child, rows, cols, scroll: 0 })
+        Ok(Term { key, title, cwd: cwd.to_string(), restorable: true, parser, writer, master: pair.master, child, rows, cols, scroll: 0 })
     }
 
     pub fn send(&mut self, bytes: &[u8]) {
