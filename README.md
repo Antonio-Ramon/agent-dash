@@ -56,6 +56,10 @@ agent-dash --dump
 
 Deu erro? Veja os [problemas comuns](INSTALL.md#8-problemas-comuns).
 
+Depois de instalado, o agent-dash **se atualiza sozinho**: ao abrir, confere o release mais recente
+no GitHub e, se houver versão nova, baixa o executável, troca o atual e reabre
+([guia, 6](INSTALL.md#6-atualizar)).
+
 ## Rodar
 
 ```powershell

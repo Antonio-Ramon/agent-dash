@@ -1,0 +1,53 @@
+# Publica um release com o executável sempre que a versão do Cargo.toml muda
+# na main. Lançar uma versão = subir o `version` no PR; a tag e o binário
+# saem daqui. É desse release que o agent-dash se atualiza ao abrir.
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Versão do Cargo.toml
+        id: v
+        shell: bash
+        run: |
+          v=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if gh release view "v$v" >/dev/null 2>&1; then
+            echo "v$v já foi publicada; nada a fazer."
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compilar
+        if: steps.v.outputs.new == 'true'
+        env:
+          # CRT estático: o exe não depende do VCRUNTIME140.dll na máquina de quem baixa.
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --locked
+
+      - name: Conferir o executável
+        if: steps.v.outputs.new == 'true'
+        shell: bash
+        run: |
+          cargo test --release --locked
+          test "$(./target/release/agent-dash.exe --version)" = "agent-dash ${{ steps.v.outputs.version }}"
+
+      - name: Publicar o release
+        if: steps.v.outputs.new == 'true'
+        shell: bash
+        run: |
+          gh release create "v${{ steps.v.outputs.version }}" target/release/agent-dash.exe \
+            --target "$GITHUB_SHA" --title "v${{ steps.v.outputs.version }}" --generate-notes

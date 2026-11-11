@@ -5,6 +5,7 @@ mod model;
 mod scan;
 mod term;
 mod ui;
+mod update;
 
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind};
 use ratatui::crossterm::execute;
@@ -21,14 +22,30 @@ Uso:
   agent-dash --fix-terminal   conserta a aba atual se ela ficou imprimindo códigos ao mexer o mouse
   agent-dash --frame [LxA]    desenha as telas em memória e imprime (depuração)
   agent-dash --chat-test      abre um chat embutido, manda uma mensagem e imprime (depuração)
+  agent-dash --version        mostra a versão
   agent-dash --help           esta mensagem
 
-Lê ~/.claude (ou $CLAUDE_CONFIG_DIR). Dentro do dashboard, aperte ? para ver os atalhos.";
+Lê ~/.claude (ou $CLAUDE_CONFIG_DIR). Dentro do dashboard, aperte ? para ver os atalhos.
+
+Ao abrir, o dashboard procura uma versão mais nova no GitHub e se atualiza sozinho.
+Para desligar isso, defina a variável de ambiente AGENT_DASH_NO_UPDATE=1.";
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("{HELP}");
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("agent-dash {}", update::VERSION);
+        return Ok(());
+    }
+    if let Some(i) = args.iter().position(|a| a == "--install-from") {
+        // Depuração: troca este executável por outro já baixado (mesmo caminho da atualização automática).
+        let (new, ver) = args.get(i + 1).zip(args.get(i + 2)).ok_or_else(|| anyhow::anyhow!("uso: --install-from <exe> <versão>"))?;
+        let exe = std::env::current_exe()?;
+        update::install(std::path::Path::new(new), &exe, ver).map_err(|e| anyhow::anyhow!(e))?;
+        println!("instalado em {}", exe.display());
         return Ok(());
     }
     if args.iter().any(|a| a == "--dump") {
@@ -146,6 +163,10 @@ fn run_tui() -> anyhow::Result<()> {
     use std::io::IsTerminal;
     if !std::io::stdout().is_terminal() {
         anyhow::bail!("o dashboard precisa de um terminal interativo; para saída em texto use `agent-dash --dump`");
+    }
+    // Versão mais nova publicada: baixa, troca o executável e relança.
+    if let Some(code) = update::auto() {
+        std::process::exit(code);
     }
     let (tx, rx) = mpsc::channel();
     let (ctl_tx, ctl_rx) = mpsc::channel();

@@ -1244,7 +1244,7 @@ fn draw_help(f: &mut Frame) {
             Block::bordered()
                 .border_type(BorderType::Thick)
                 .border_style(Style::new().fg(FOCUS))
-                .title(" Ajuda ")
+                .title(format!(" Ajuda · v{} ", crate::update::VERSION))
                 .title_alignment(Alignment::Center),
         ),
         r,

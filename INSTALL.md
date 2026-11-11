@@ -190,12 +190,25 @@ Na primeira abertura o cabeçalho mostra "lendo histórico N%" enquanto o histó
 
 ## 6. Atualizar
 
-Feche o `agent-dash` antes (o Windows não deixa substituir um executável em uso) e rode, na pasta do repositório:
+**A partir da versão 0.2.0 o agent-dash se atualiza sozinho.** Ao abrir, ele confere o release mais
+recente no GitHub; se houver versão mais nova, baixa o executável, troca o atual e reabre já
+atualizado. Não precisa de Rust nem do repositório para isso.
+
+- Sem internet (ou se o download falhar), ele abre na versão instalada, sem reclamar.
+- `agent-dash --version` mostra a versão; ela também aparece no título da ajuda (`?`).
+- Para desligar a atualização automática, defina a variável de ambiente `AGENT_DASH_NO_UPDATE=1`.
+- O executável anterior fica como `agent-dash.old.exe` ao lado do novo e é apagado na abertura seguinte.
+
+Quem instalou uma versão anterior à 0.2.0 precisa atualizar à mão **uma última vez**. Feche o
+`agent-dash` (o Windows não deixa substituir um executável em uso) e rode, na pasta do repositório:
 
 ```powershell
 git pull
 cargo install --locked --path .
 ```
+
+Quem desenvolve: uma versão nova é publicada quando o `version` do `Cargo.toml` muda na `main`
+(o workflow `release` compila e cria o release `vX.Y.Z`). Sem mudar o `version`, nada é publicado.
 
 ## 7. Desinstalar
 
