@@ -73,7 +73,8 @@ Se o comando não for encontrado, abra um terminal novo (o rustup adiciona
 | Tecla | Ação |
 |---|---|
 | `1` `2` `3` `4` / `Tab` / `h` `l` | painel: Sessões, Agentes, Tasks, Uso por dia |
-| | Agentes e Tasks só aparecem quando têm algum item (`a` traz os terminados das últimas 24h); a altura acompanha a quantidade |
+| | os quatro painéis da esquerda têm altura fixa (não mudam com a quantidade de itens); lista maior que o painel rola, e o painel em foco mostra a barra de rolagem |
+| mouse | **roda**: rola o que está sob o cursor (lista, painel principal ou chat) sem mudar foco nem seleção; **clique**: dá foco ao painel e seleciona a linha; clique no chat entrega o teclado a ele. Para selecionar texto com o mouse, segure `Shift` |
 | `j` `k` / `↑` `↓` / `g` `G` | mover seleção |
 | `[` `]` | trocar aba do painel principal (Resumo / Atividade / Processos, Saída / Detalhes) |
 | `J` `K` / `PgUp` `PgDn` | rolar o painel principal (na saída de uma task, sobe a partir do fim) |
@@ -100,6 +101,11 @@ Se o comando não for encontrado, abra um terminal novo (o rustup adiciona
 O agent-dash roda o próprio `claude` num pseudo-terminal (ConPTY) e desenha a tela dele na aba
 **Chat** do painel principal, como um tmux. Vários chats ficam abertos ao mesmo tempo; `F12` volta
 para a lista e `Enter` em outra sessão troca de conversa.
+
+Os chats abertos ficam anotados em `%LOCALAPPDATA%\agent-dash\open_chats.json` a cada mudança. Se o
+dashboard fechar com chats abertos (`q`, janela fechada, queda), na próxima abertura ele pergunta se
+é para **reabrir todos** (`claude --resume` em cada um). Chat encerrado por você sai da lista; attach
+em sessão de background não entra, porque ela continua rodando sozinha.
 
 - Funciona para sessões **abertas pelo dashboard** (`n`), **encerradas** (`claude --resume`) e
   **em background** (`claude attach`).

@@ -4,11 +4,12 @@
 use crate::app::{App, Panel};
 use crate::model::*;
 use chrono::{DateTime, Local};
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Bar, BarChart, BarGroup, Block, BorderType, Cell, Clear, List, ListItem, Paragraph, Row, Sparkline, Table, Wrap,
+    Bar, BarChart, BarGroup, Block, BorderType, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Scrollbar,
+    ScrollbarOrientation, ScrollbarState, Sparkline, Table, Wrap,
 };
 use ratatui::Frame;
 
@@ -171,30 +172,26 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Layout::vertical([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
     draw_header(f, header, app);
     if app.zoom {
+        app.rects = [Rect::default(); 4];
+        app.main_rect = body;
         draw_main(f, body, app);
     } else {
         let [left, right] = Layout::horizontal([Constraint::Percentage(27), Constraint::Percentage(73)]).areas(body);
-        // Agentes e Tasks só ocupam espaço quando têm algo; a altura acompanha
-        // o número de itens, até um teto. Sessões fica com o que sobrar.
+        // Alturas fixas: dependem só da altura da tela, nunca do número de itens.
+        // Lista maior que o painel rola (roda do mouse ou seleção).
         let h = left.height;
-        let fit = |n: usize, pct: u16| (n as u16 + 2).clamp(3, (h * pct / 100).max(3));
-        let (show_a, show_t) = (app.panel_visible(Panel::Agents), app.panel_visible(Panel::Tasks));
-        let ha = if show_a { fit(app.agents().len(), 26) } else { 0 };
-        let ht = if show_t { fit(app.tasks().len(), 28) } else { 0 };
         let [a, b, c, d] = Layout::vertical([
             Constraint::Min(5),
-            Constraint::Length(ha),
-            Constraint::Length(ht),
+            Constraint::Length((h * 18 / 100).max(4)),
+            Constraint::Length((h * 20 / 100).max(4)),
             Constraint::Length((h * 24 / 100).max(8)),
         ])
         .areas(left);
+        app.rects = [a, b, c, d];
+        app.main_rect = right;
         draw_sessions(f, a, app);
-        if show_a {
-            draw_agents(f, b, app);
-        }
-        if show_t {
-            draw_tasks(f, c, app);
-        }
+        draw_agents(f, b, app);
+        draw_tasks(f, c, app);
         draw_days(f, d, app);
         draw_main(f, right, app);
     }
@@ -456,9 +453,46 @@ fn key_line(keys: &[(&str, &str)]) -> Line<'static> {
     Line::from(spans)
 }
 
-fn list_widget<'a>(items: Vec<ListItem<'a>>, block: Block<'a>, focused: bool) -> List<'a> {
+/// Lista de um painel da esquerda. A janela visível é `app.offsets`, não a do
+/// `ListState` (que sempre puxa a rolagem de volta para o item selecionado):
+/// assim a roda do mouse rola sem mexer na seleção.
+fn draw_list(f: &mut Frame, area: Rect, app: &mut App, p: Panel, items: Vec<ListItem>, title: String) {
+    let focused = app.focus == p;
+    let i = p.idx();
+    let h = area.height.saturating_sub(2) as usize;
+    let n = items.len();
+    let max_off = n.saturating_sub(h);
+    let mut off = app.offsets[i];
+    let cur = app.states[i].selected();
+    // Seleção mudou (ou a lista reordenou com ela à vista): rola o mínimo para mostrá-la.
+    if std::mem::take(&mut app.reveal[i])
+        && let Some(s) = cur
+        && h > 0
+    {
+        if s < off {
+            off = s;
+        } else if s >= off + h {
+            off = s + 1 - h;
+        }
+    }
+    let off = off.min(max_off);
+    app.offsets[i] = off;
+    let sel = cur.filter(|s| *s >= off && *s < off + h).map(|s| s - off);
+    app.sel_visible[i] = sel.is_some() || cur.is_none();
+    let visible: Vec<ListItem> = items.into_iter().skip(off).take(h).collect();
     let hl = if focused { Style::new().bg(SEL_BG).add_modifier(Modifier::BOLD) } else { Style::new().bg(Color::Rgb(35, 38, 46)) };
-    List::new(items).block(block).highlight_style(hl)
+    let list = List::new(visible).block(panel_block(title, focused)).highlight_style(hl);
+    f.render_stateful_widget(list, area, &mut ListState::default().with_selected(sel));
+    if (focused || app.wheel == Some(p)) && max_off > 0 {
+        let bar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .thumb_symbol("█")
+            .style(Style::new().fg(if focused { FOCUS } else { Color::Gray }));
+        let mut st = ScrollbarState::new(max_off + 1).viewport_content_length(h).position(off);
+        f.render_stateful_widget(bar, area.inner(Margin { vertical: 1, horizontal: 0 }), &mut st);
+    }
 }
 
 fn empty_hint(f: &mut Frame, area: Rect, text: &str) {
@@ -467,7 +501,6 @@ fn empty_hint(f: &mut Frame, area: Rect, text: &str) {
 }
 
 fn draw_sessions(f: &mut Frame, area: Rect, app: &mut App) {
-    let focused = app.focus == Panel::Sessions;
     let chats: Vec<String> = app.terms.iter().map(|t| t.key.clone()).collect();
     let list = app.sessions();
     let alive = app.snap.sessions.iter().filter(|s| s.alive).count();
@@ -499,14 +532,13 @@ fn draw_sessions(f: &mut Frame, area: Rect, app: &mut App) {
         .collect();
     let n = items.len();
     let title = if app.show_all { format!("[1] Sessões ({alive} vivas, {n} em 24h)") } else { format!("[1] Sessões ({alive})") };
-    f.render_stateful_widget(list_widget(items, panel_block(title, focused), focused), area, &mut app.states[0]);
+    draw_list(f, area, app, Panel::Sessions, items, title);
     if n == 0 {
         empty_hint(f, area, "nenhuma sessão do Claude Code rodando");
     }
 }
 
 fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
-    let focused = app.focus == Panel::Agents;
     let list = app.agents();
     let running = list.iter().filter(|a| a.running).count();
     let w = area.width.saturating_sub(4) as usize;
@@ -531,14 +563,13 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
     let n = items.len();
     let scope = if app.only_selected { " · sessão" } else { "" };
     let title = format!("[2] Agentes ({running} rodando{scope})");
-    f.render_stateful_widget(list_widget(items, panel_block(title, focused), focused), area, &mut app.states[1]);
+    draw_list(f, area, app, Panel::Agents, items, title);
     if n == 0 {
         empty_hint(f, area, "nenhum subagente ativo");
     }
 }
 
 fn draw_tasks(f: &mut Frame, area: Rect, app: &mut App) {
-    let focused = app.focus == Panel::Tasks;
     let list = app.tasks();
     let running = list.iter().filter(|t| t.status == TaskStatus::Running).count();
     let w = area.width.saturating_sub(4) as usize;
@@ -565,7 +596,7 @@ fn draw_tasks(f: &mut Frame, area: Rect, app: &mut App) {
     let n = items.len();
     let scope = if app.only_selected { " · sessão" } else { "" };
     let title = format!("[3] Shells/Monitors/Tasks ({running} rodando{scope})");
-    f.render_stateful_widget(list_widget(items, panel_block(title, focused), focused), area, &mut app.states[2]);
+    draw_list(f, area, app, Panel::Tasks, items, title);
     if n == 0 {
         empty_hint(f, area, "nada em background");
     }
@@ -1157,6 +1188,7 @@ fn draw_help(f: &mut Frame) {
         k("g G Home End", "início / fim da lista"),
         k("[ ]", "trocar aba do painel principal"),
         k("J K PgUp PgDn", "rolar o painel principal"),
+        k("mouse", "roda rola o que está sob o cursor · clique seleciona"),
         k("z  +", "zoom no painel principal"),
         k("Esc", "sair do zoom / fechar ajuda"),
         Line::raw(""),

@@ -6,7 +6,8 @@ mod scan;
 mod term;
 mod ui;
 
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind};
+use ratatui::crossterm::execute;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -88,6 +89,42 @@ fn frame(size: &str) -> anyhow::Result<()> {
         ("confirmar encerrar", vec![KeyCode::Esc, KeyCode::Char('x')]),
         ("aba chat", vec![KeyCode::Esc, KeyCode::Char(']'), KeyCode::Char(']')]),
     ];
+    // Mouse sintético: a roda sobre Sessões rola a lista sem mexer na seleção;
+    // o clique dá foco e seleciona a linha clicada.
+    {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        term.draw(|f| ui::draw(f, &mut app))?;
+        let ev = |kind, column, row| MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE };
+        let r = app.rects;
+        eprintln!("painéis da esquerda (y, altura): {:?}", r.iter().map(|r| (r.y, r.height)).collect::<Vec<_>>());
+        let sel0 = app.states[0].selected();
+        app.on_mouse(ev(MouseEventKind::ScrollDown, r[0].x + 2, r[0].y + 1));
+        eprintln!("roda em Sessões: offset {} (seleção {:?} -> {:?})", app.offsets[0], sel0, app.states[0].selected());
+        app.on_mouse(ev(MouseEventKind::ScrollUp, r[0].x + 2, r[0].y + 1));
+        app.on_mouse(ev(MouseEventKind::Down(MouseButton::Left), r[0].x + 2, r[0].y + 2));
+        eprintln!("clique na 2ª linha de Sessões: foco {:?}, seleção {:?}, offset {}", app.focus, app.states[0].selected(), app.offsets[0]);
+        app.on_mouse(ev(MouseEventKind::Down(MouseButton::Left), r[0].x + 2, r[0].y + 1));
+        // A seleção tem de continuar à vista depois de `G` e de `a` (lista muda).
+        let h = r[0].height.saturating_sub(2) as usize;
+        for k in [KeyCode::Char('G'), KeyCode::Char('a'), KeyCode::Char('a'), KeyCode::Char('g')] {
+            app.on_key(KeyEvent::new(k, KeyModifiers::NONE), &ctl_tx);
+            term.draw(|f| ui::draw(f, &mut app))?;
+            let (sel, off) = (app.states[0].selected().unwrap_or(0), app.offsets[0]);
+            eprintln!("após {k:?}: seleção {sel}, offset {off}, altura {h} -> {}", if sel >= off && sel < off + h { "à vista" } else { "FORA DA VISTA" });
+        }
+    }
+    // Aviso de "reabrir sessões" (só desenha; não responde, para não mexer na lista real).
+    app.offer_restore();
+    if app.confirm.is_some() {
+        term.draw(|f| ui::draw(f, &mut app))?;
+        println!("===== reabrir sessões =====");
+        let buf = term.backend().buffer().clone();
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            println!("{}", line.trim_end());
+        }
+        app.confirm = None;
+    }
     for (name, ks) in keys {
         for k in ks {
             app.on_key(KeyEvent::new(k, KeyModifiers::NONE), &ctl_tx);
@@ -115,7 +152,16 @@ fn run_tui() -> anyhow::Result<()> {
     thread::Builder::new().name("collector".into()).spawn(move || collector::run(tx, ctl_rx))?;
 
     let mut terminal = ratatui::init();
+    // Mouse: roda e clique nos painéis. Um panic também precisa soltar a
+    // captura, senão a aba fica imprimindo códigos a cada movimento.
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        hook(info);
+    }));
+    execute!(std::io::stdout(), EnableMouseCapture)?;
     let mut app = app::App::new();
+    app.offer_restore();
     let result = (|| -> anyhow::Result<()> {
         // Só redesenha quando algo mudou (tecla, saída de um chat, snapshot novo)
         // ou a cada 250 ms, para relógios e avisos.
@@ -145,12 +191,16 @@ fn run_tui() -> anyhow::Result<()> {
             // Com chat aberto, acorda rápido para mostrar o que o Claude escreve.
             let wait = if app.terms.is_empty() { 100 } else { 3 };
             let mut keys = Vec::new();
+            let mut mouse = Vec::new();
             if event::poll(Duration::from_millis(wait))? {
                 loop {
-                    if let Event::Key(k) = event::read()?
-                        && k.kind != KeyEventKind::Release {
-                            keys.push(k);
-                        }
+                    match event::read()? {
+                        Event::Key(k) if k.kind != KeyEventKind::Release => keys.push(k),
+                        // Movimento chega aos montes e não muda nada: ignora sem redesenhar.
+                        Event::Mouse(m) if !matches!(m.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)) => mouse.push(m),
+                        Event::Resize(..) => need_draw = true,
+                        _ => {}
+                    }
                     if !event::poll(Duration::ZERO)? {
                         break;
                     }
@@ -164,12 +214,16 @@ fn run_tui() -> anyhow::Result<()> {
                     app.on_key(k, &ctl_tx);
                 }
             }
+            for m in mouse {
+                need_draw |= app.on_mouse(m);
+            }
             if app.quit {
                 return Ok(());
             }
         }
     })();
     let _ = ctl_tx.send(collector::Ctl::Quit);
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
 }
