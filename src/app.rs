@@ -322,7 +322,8 @@ impl App {
         self.snap
             .sessions
             .iter()
-            .filter(|s| (self.show_all || s.alive || s.status == "pendente") && !self.is_hidden(&format!("s:{}", s.session_id)))
+            // Viva nunca fica oculta: uma sessão limpa com `d` pode voltar com /resume.
+            .filter(|s| (self.show_all || s.alive || s.status == "pendente") && (s.alive || !self.is_hidden(&format!("s:{}", s.session_id))))
             .collect()
     }
 
