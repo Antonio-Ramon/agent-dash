@@ -730,7 +730,15 @@ impl App {
                         self.wheel = Some(p);
                     }
                     None if in_main => match self.shown_chat() {
-                        Some(i) => self.terms[i].scroll_by(if down { -3 } else { 3 }),
+                        Some(i) => {
+                            let r = self.chat_rect;
+                            let col = m.column.clamp(r.x, r.right().saturating_sub(1)) - r.x;
+                            let row = m.row.clamp(r.y, r.bottom().saturating_sub(1)) - r.y;
+                            if self.terms[i].wheel(!down, col, row) {
+                                // O programa redesenha a tela: a seleção marcada deixaria de bater.
+                                self.chat_sel = None;
+                            }
+                        }
                         None if self.showing_chat() => {}
                         None => self.scroll_main(if down { 3 } else { -3 }),
                     },

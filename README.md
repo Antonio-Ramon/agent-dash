@@ -78,7 +78,7 @@ Se o comando não for encontrado, abra um terminal novo (o rustup adiciona
 |---|---|
 | `1` `2` `3` `4` / `Tab` / `h` `l` | painel: Sessões, Agentes, Tasks, Uso por dia |
 | | os quatro painéis da esquerda têm altura fixa (não mudam com a quantidade de itens); lista maior que o painel rola, e o painel em foco mostra a barra de rolagem |
-| mouse | **roda**: rola o que está sob o cursor (lista, painel principal ou chat) sem mudar foco nem seleção; **clique**: dá foco ao painel e seleciona a linha; clique no chat entrega o teclado a ele; **arrastar no chat** seleciona o texto e copia ao soltar (`Ctrl+C` com seleção copia de novo em vez de interromper o Claude). Fora do chat, para selecionar texto segure `Shift` |
+| mouse | **roda**: rola o que está sob o cursor (lista, painel principal ou chat) sem mudar foco nem seleção; no chat a roda vai para o Claude, que rola a conversa como num terminal comum; **clique**: dá foco ao painel e seleciona a linha; clique no chat entrega o teclado a ele; **arrastar no chat** seleciona o texto e copia ao soltar (`Ctrl+C` com seleção copia de novo em vez de interromper o Claude). Fora do chat, para selecionar texto segure `Shift` |
 | `j` `k` / `↑` `↓` / `g` `G` | mover seleção |
 | `[` `]` | trocar aba do painel principal (Resumo / Atividade / Processos, Saída / Detalhes) |
 | `J` `K` / `PgUp` `PgDn` | rolar o painel principal (na saída de uma task, sobe a partir do fim) |

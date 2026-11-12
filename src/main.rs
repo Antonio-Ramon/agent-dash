@@ -51,10 +51,18 @@ fn main() -> anyhow::Result<()> {
     }
     if args.iter().any(|a| a == "--update") {
         // Mesma checagem feita ao abrir o dashboard, sem abrir a interface.
-        if let Some(code) = update::auto() {
-            std::process::exit(code);
+        let v = update::VERSION;
+        if std::env::var_os("AGENT_DASH_UPDATED").is_some() {
+            // Esta é a versão nova, relançada logo depois da troca.
+            println!("agent-dash atualizado para a versão {v}.");
+            return Ok(());
         }
-        println!("agent-dash {}: nenhuma atualização aplicada", update::VERSION);
+        match update::run() {
+            update::Outcome::Relaunched(code) => std::process::exit(code),
+            update::Outcome::UpToDate => println!("agent-dash {v} já é a versão mais recente."),
+            update::Outcome::Skipped(why) if why.is_empty() => println!("agent-dash {v}: atualização desativada neste executável."),
+            update::Outcome::Skipped(why) => println!("agent-dash {v}: {why}."),
+        }
         return Ok(());
     }
     if args.iter().any(|a| a == "--dump") {

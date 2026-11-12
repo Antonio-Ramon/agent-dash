@@ -131,6 +131,29 @@ impl Term {
         self.scroll = (self.scroll as isize + delta).clamp(0, SCROLLBACK as isize) as usize;
     }
 
+    /// Um passo da roda do mouse em (col, row), relativo ao canto do chat.
+    /// Como num terminal de verdade: o Claude Code em tela cheia pede os
+    /// eventos de mouse e rola a conversa sozinho, então a roda vai para ele.
+    /// Os outros programas rolam no histórico guardado aqui. Devolve se a
+    /// roda foi para o programa (aí a tela muda por conta dele).
+    pub fn wheel(&mut self, up: bool, col: u16, row: u16) -> bool {
+        let bytes = {
+            let p = self.parser.lock().unwrap();
+            let s = p.screen();
+            wheel_bytes(s.mouse_protocol_mode(), s.mouse_protocol_encoding(), s.alternate_screen(), s.application_cursor(), up, col, row)
+        };
+        match bytes {
+            Some(b) => {
+                self.send(&b);
+                true
+            }
+            None => {
+                self.scroll_by(if up { 3 } else { -3 });
+                false
+            }
+        }
+    }
+
     /// Cola texto (com bracketed paste, se o programa pediu).
     pub fn paste(&mut self, text: &str) {
         let bracketed = self.parser.lock().unwrap().screen().bracketed_paste();
@@ -191,6 +214,45 @@ pub fn text_between(p: &mut vt100::Parser, a: (i64, u16), b: (i64, u16)) -> Stri
     }
     p.set_scrollback(0);
     out
+}
+
+/// Bytes que um terminal (xterm) manda ao programa por um passo da roda, ou
+/// `None` quando a roda deve rolar o histórico local. Com o mouse ligado pelo
+/// programa vai o evento de mouse (botões 64/65); na tela alternativa sem
+/// mouse vão três setas, como o "alternate scroll" do xterm.
+fn wheel_bytes(
+    mode: vt100::MouseProtocolMode,
+    enc: vt100::MouseProtocolEncoding,
+    alt: bool,
+    app_cursor: bool,
+    up: bool,
+    col: u16,
+    row: u16,
+) -> Option<Vec<u8>> {
+    use vt100::{MouseProtocolEncoding as E, MouseProtocolMode as M};
+    let button: u32 = if up { 64 } else { 65 };
+    let (x, y) = (col as u32 + 1, row as u32 + 1);
+    if mode != M::None {
+        return Some(match enc {
+            E::Sgr => format!("\x1b[<{button};{x};{y}M").into_bytes(),
+            E::Utf8 => {
+                let ch = |v: u32| char::from_u32(32 + v.min(2015)).unwrap_or(' ');
+                format!("\x1b[M{}{}{}", ch(button), ch(x), ch(y)).into_bytes()
+            }
+            // X10: um byte por valor, só alcança até a coluna 223.
+            E::Default => vec![0x1b, b'[', b'M', (32 + button) as u8, (32 + x.min(223)) as u8, (32 + y.min(223)) as u8],
+        });
+    }
+    if alt {
+        let arrow: &[u8] = match (up, app_cursor) {
+            (true, true) => b"\x1bOA",
+            (true, false) => b"\x1b[A",
+            (false, true) => b"\x1bOB",
+            (false, false) => b"\x1b[B",
+        };
+        return Some(arrow.repeat(3));
+    }
+    None
 }
 
 /// AltGr no Windows chega como Ctrl+Alt com o caractere já resolvido pelo
@@ -328,6 +390,27 @@ mod tests {
         assert_eq!(text_between(&mut p, (0, 3), (-2, 0)), "linha1\nlinha2\nlinh");
         assert_eq!(text_between(&mut p, (2, 2), (2, 9)), "nha5");
         assert_eq!(p.screen().scrollback(), 0);
+    }
+
+    #[test]
+    fn roda_vai_para_o_programa_que_pediu_mouse() {
+        let mut p = vt100::Parser::new(10, 40, 100);
+        let bytes = |p: &vt100::Parser, up| {
+            let s = p.screen();
+            wheel_bytes(s.mouse_protocol_mode(), s.mouse_protocol_encoding(), s.alternate_screen(), s.application_cursor(), up, 4, 2)
+        };
+        // Terminal comum: a roda rola o histórico local.
+        assert_eq!(bytes(&p, true), None);
+        // Tela alternativa sem mouse: setas.
+        p.process(b"\x1b[?1049h");
+        assert_eq!(bytes(&p, true), Some(b"\x1b[A\x1b[A\x1b[A".to_vec()));
+        // Mouse em modo X10 (coordenadas a partir de 1, somadas a 32).
+        p.process(b"\x1b[?1000h");
+        assert_eq!(bytes(&p, false), Some(vec![0x1b, b'[', b'M', 32 + 65, 32 + 5, 32 + 3]));
+        // Como o Claude Code em tela cheia: SGR.
+        p.process(b"\x1b[?1003h\x1b[?1006h");
+        assert_eq!(bytes(&p, true), Some(b"\x1b[<64;5;3M".to_vec()));
+        assert_eq!(bytes(&p, false), Some(b"\x1b[<65;5;3M".to_vec()));
     }
 
     #[test]

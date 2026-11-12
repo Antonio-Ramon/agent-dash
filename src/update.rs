@@ -78,23 +78,56 @@ fn relaunch(exe: &Path) -> i32 {
         .unwrap_or(1)
 }
 
+/// Resultado de uma checagem de atualização.
+pub enum Outcome {
+    /// Trocou o executável; a versão nova já rodou com os mesmos argumentos
+    /// e saiu com este código.
+    Relaunched(i32),
+    /// Já está no release mais recente.
+    UpToDate,
+    /// Não checou ou não conseguiu atualizar (o motivo vai junto).
+    Skipped(String),
+}
+
 /// Chamado ao abrir o dashboard. Devolve `Some(código)` se atualizou e a
 /// versão nova já rodou até o fim (o chamador só precisa sair com o código).
 pub fn auto() -> Option<i32> {
-    let exe = std::env::current_exe().ok()?;
+    match run() {
+        Outcome::Relaunched(code) => Some(code),
+        Outcome::UpToDate => None,
+        Outcome::Skipped(why) => {
+            if !why.is_empty() {
+                println!("{why}; abrindo a versão {VERSION}.");
+            }
+            None
+        }
+    }
+}
+
+/// Confere o release mais recente e, se for mais novo, baixa, instala e relança.
+pub fn run() -> Outcome {
+    let Ok(exe) = std::env::current_exe() else {
+        return Outcome::Skipped(String::new());
+    };
     // Sobra da atualização anterior.
     let _ = std::fs::remove_file(sibling(&exe, "old"));
     let _ = std::fs::remove_file(sibling(&exe, "new"));
-    if std::env::var_os("AGENT_DASH_UPDATED").is_some() || std::env::var_os("AGENT_DASH_NO_UPDATE").is_some() {
-        return None;
+    if std::env::var_os("AGENT_DASH_UPDATED").is_some() {
+        return Outcome::UpToDate;
+    }
+    if std::env::var_os("AGENT_DASH_NO_UPDATE").is_some() {
+        return Outcome::Skipped(String::new());
     }
     // Binário de desenvolvimento (`cargo run`, target\release): não mexe.
     if !cfg!(windows) || exe.components().any(|c| c.as_os_str() == "target") {
-        return None;
+        return Outcome::Skipped(String::new());
     }
-    let latest = latest_version()?;
-    if parse_version(&latest)? <= parse_version(VERSION)? {
-        return None;
+    let Some(latest) = latest_version() else {
+        return Outcome::Skipped("não consegui consultar o GitHub".into());
+    };
+    match (parse_version(&latest), parse_version(VERSION)) {
+        (Some(l), Some(v)) if l > v => {}
+        _ => return Outcome::UpToDate,
     }
     println!("agent-dash {VERSION} -> {latest}: baixando a atualização…");
     let new = sibling(&exe, "new");
@@ -107,15 +140,13 @@ pub fn auto() -> Option<i32> {
         .is_ok_and(|s| s.success());
     if !ok {
         let _ = std::fs::remove_file(&new);
-        println!("não consegui baixar a atualização; abrindo a versão {VERSION}.");
-        return None;
+        return Outcome::Skipped("não consegui baixar a atualização".into());
     }
     match install(&new, &exe, &latest) {
-        Ok(()) => Some(relaunch(&exe)),
+        Ok(()) => Outcome::Relaunched(relaunch(&exe)),
         Err(e) => {
             let _ = std::fs::remove_file(&new);
-            println!("atualização não aplicada ({e}); abrindo a versão {VERSION}.");
-            None
+            Outcome::Skipped(format!("atualização não aplicada ({e})"))
         }
     }
 }
