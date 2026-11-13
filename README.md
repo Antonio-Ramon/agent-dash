@@ -205,4 +205,15 @@ src/
   model.rs      tipos compartilhados
   app.rs        estado da UI e teclas
   ui.rs         renderização (ratatui)
+  i18n.rs       idioma da interface (pt/en, pelo idioma do Windows)
 ```
+
+## Idioma
+
+A interface segue o idioma de exibição do Windows: português em sistemas pt-*,
+inglês nos demais. Para forçar um deles, defina `AGENT_DASH_LANG=pt` ou `AGENT_DASH_LANG=en`.
+
+## Licença
+
+MIT. Ver [LICENSE](LICENSE). Autores: Antonio Ramon e Mateus Cristo.
+A ajuda do dashboard (`?`) e o `agent-dash --help` mostram versão, autores e licença.

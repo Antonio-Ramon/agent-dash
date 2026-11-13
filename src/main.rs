@@ -1,6 +1,7 @@
 mod actions;
 mod app;
 mod collector;
+mod i18n;
 mod model;
 mod scan;
 mod term;
@@ -13,7 +14,10 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-const HELP: &str = "agent-dash — monitor do Claude Code (estilo lazygit)
+fn help() -> String {
+    let (version, license, repo, authors) = (update::VERSION, update::LICENSE, update::REPO, update::authors());
+    i18n::tr!(
+        "agent-dash — monitor do Claude Code (estilo lazygit)
 
 Uso:
   agent-dash                  abre o dashboard
@@ -29,12 +33,47 @@ Uso:
 Lê ~/.claude (ou $CLAUDE_CONFIG_DIR). Dentro do dashboard, aperte ? para ver os atalhos.
 
 Ao abrir, o dashboard procura uma versão mais nova no GitHub e se atualiza sozinho.
-Para desligar isso, defina a variável de ambiente AGENT_DASH_NO_UPDATE=1.";
+Para desligar isso, defina a variável de ambiente AGENT_DASH_NO_UPDATE=1.
+
+O idioma segue o do Windows (português ou inglês); AGENT_DASH_LANG=en ou pt força um deles.
+
+Sobre:
+  versão    {version}
+  autores   {authors}
+  licença   {license}
+  código    {repo}",
+        "agent-dash — Claude Code monitor (lazygit style)
+
+Usage:
+  agent-dash                  opens the dashboard
+  agent-dash --dump           prints a text summary (no TUI) and exits
+  agent-dash --stop-task ID   stops a background shell/monitor by id
+  agent-dash --fix-terminal   fixes the current tab if it keeps printing codes when the mouse moves
+  agent-dash --frame [WxH]    draws the screens in memory and prints them (debugging)
+  agent-dash --chat-test      opens an embedded chat, sends a message and prints it (debugging)
+  agent-dash --version        shows the version
+  agent-dash --update         looks for and installs a newer version, without opening the interface
+  agent-dash --help           this message
+
+Reads ~/.claude (or $CLAUDE_CONFIG_DIR). Inside the dashboard, press ? to see the shortcuts.
+
+On start, the dashboard looks for a newer version on GitHub and updates itself.
+To turn that off, set the environment variable AGENT_DASH_NO_UPDATE=1.
+
+The language follows Windows (Portuguese or English); AGENT_DASH_LANG=en or pt forces one.
+
+About:
+  version   {version}
+  authors   {authors}
+  license   {license}
+  source    {repo}"
+    )
+}
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("{HELP}");
+        println!("{}", help());
         return Ok(());
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
@@ -54,13 +93,15 @@ fn main() -> anyhow::Result<()> {
         let v = update::VERSION;
         if std::env::var_os("AGENT_DASH_UPDATED").is_some() {
             // Esta é a versão nova, relançada logo depois da troca.
-            println!("agent-dash atualizado para a versão {v}.");
+            println!("{}", i18n::tr!("agent-dash atualizado para a versão {v}.", "agent-dash updated to version {v}."));
             return Ok(());
         }
         match update::run() {
             update::Outcome::Relaunched(code) => std::process::exit(code),
-            update::Outcome::UpToDate => println!("agent-dash {v} já é a versão mais recente."),
-            update::Outcome::Skipped(why) if why.is_empty() => println!("agent-dash {v}: atualização desativada neste executável."),
+            update::Outcome::UpToDate => println!("{}", i18n::tr!("agent-dash {v} já é a versão mais recente.", "agent-dash {v} is already the latest version.")),
+            update::Outcome::Skipped(why) if why.is_empty() => {
+                println!("{}", i18n::tr!("agent-dash {v}: atualização desativada neste executável.", "agent-dash {v}: updates are disabled for this executable."))
+            }
             update::Outcome::Skipped(why) => println!("agent-dash {v}: {why}."),
         }
         return Ok(());
@@ -69,7 +110,7 @@ fn main() -> anyhow::Result<()> {
         return dump();
     }
     if let Some(i) = args.iter().position(|a| a == "--stop-task") {
-        let id = args.get(i + 1).ok_or_else(|| anyhow::anyhow!("uso: agent-dash --stop-task <id>"))?;
+        let id = args.get(i + 1).ok_or_else(|| anyhow::anyhow!(i18n::t("uso: agent-dash --stop-task <id>", "usage: agent-dash --stop-task <id>")))?;
         return stop_task(id);
     }
     if let Some(i) = args.iter().position(|a| a == "--reset-console") {
@@ -80,7 +121,7 @@ fn main() -> anyhow::Result<()> {
     if args.iter().any(|a| a == "--fix-terminal") {
         // Para rodar numa aba que ficou imprimindo lixo ao mexer o mouse.
         print!("{}", actions::TERM_RESET);
-        println!("terminal restaurado");
+        println!("{}", i18n::t("terminal restaurado", "terminal restored"));
         return Ok(());
     }
     if args.iter().any(|a| a == "--reset-test") {
@@ -179,7 +220,10 @@ fn frame(size: &str) -> anyhow::Result<()> {
 fn run_tui() -> anyhow::Result<()> {
     use std::io::IsTerminal;
     if !std::io::stdout().is_terminal() {
-        anyhow::bail!("o dashboard precisa de um terminal interativo; para saída em texto use `agent-dash --dump`");
+        anyhow::bail!(i18n::t(
+            "o dashboard precisa de um terminal interativo; para saída em texto use `agent-dash --dump`",
+            "the dashboard needs an interactive terminal; for text output use `agent-dash --dump`"
+        ));
     }
     // Versão mais nova publicada: baixa, troca o executável e relança.
     if let Some(code) = update::auto() {
@@ -354,7 +398,7 @@ fn stop_task(id: &str) -> anyhow::Result<()> {
         snap = c.tick();
     }
     let Some(t) = snap.tasks.iter().find(|t| t.id == id) else {
-        anyhow::bail!("task {id} não encontrada");
+        anyhow::bail!(i18n::tr!("task {id} não encontrada", "task {id} not found"));
     };
     println!("{}", c.stop_task(&t.session_id.clone(), id));
     Ok(())

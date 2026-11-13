@@ -1,6 +1,7 @@
 //! Ações que mexem em processos: parar shells/monitors, encerrar sessões,
 //! abrir, retomar e iniciar instâncias do Claude Code.
 
+use crate::i18n::tr;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -116,7 +117,7 @@ pub fn claude_cli(args: &[String], cwd: Option<&str>) -> Result<String, String> 
         c.current_dir(d);
     }
     no_console(&mut c);
-    let out = c.output().map_err(|e| format!("não consegui rodar `claude`: {e}"))?;
+    let out = c.output().map_err(|e| tr!("não consegui rodar `claude`: {e}", "could not run `claude`: {e}"))?;
     let so = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let se = String::from_utf8_lossy(&out.stderr).trim().to_string();
     let pick = |a: String, b: String| if a.is_empty() { b } else { a };
@@ -127,7 +128,7 @@ pub fn claude_cli(args: &[String], cwd: Option<&str>) -> Result<String, String> 
 /// do console, se o `wt` não existir), com `cwd` como diretório.
 pub fn open_terminal(cwd: &str, title: &str, args: &[String]) -> Result<(), String> {
     if !Path::new(cwd).is_dir() {
-        return Err(format!("diretório não existe: {cwd}"));
+        return Err(tr!("diretório não existe: {cwd}", "directory does not exist: {cwd}"));
     }
     // `;` separa comandos no wt, e ele descarta aspas duplas dos argumentos.
     let clean = |s: &str| s.replace(';', ",").replace('"', "'");
@@ -142,7 +143,7 @@ pub fn open_terminal(cwd: &str, title: &str, args: &[String]) -> Result<(), Stri
     let mut c = Command::new("cmd");
     c.args(["/c", "start", &title, "/D", cwd, "claude"]).args(&args);
     c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    c.spawn().map(|_| ()).map_err(|e| format!("não consegui abrir um terminal: {e}"))
+    c.spawn().map(|_| ()).map_err(|e| tr!("não consegui abrir um terminal: {e}", "could not open a terminal: {e}"))
 }
 
 /// Argumentos do `claude` para uma instância nova.
@@ -211,11 +212,12 @@ pub fn pick_task_process(cands: &[ProcCand], raw_cmd: Option<&str>, requested: O
             return Ok(t[0]);
         }
         return Err(match t.len() {
-            0 => "não achei o processo desta task (talvez já tenha terminado)".into(),
-            n => format!("{n} processos possíveis; não dá para saber qual é com segurança"),
+            0 => crate::i18n::t("não achei o processo desta task (talvez já tenha terminado)", "process of this task not found (it may have finished)").into(),
+            n => tr!("{n} processos possíveis; não dá para saber qual é com segurança", "{n} possible processes; cannot tell which one safely"),
         });
     }
-    Err(format!("{} processos com o mesmo comando; não dá para saber qual é com segurança", cmd_only.len().max(both.len())))
+    let n = cmd_only.len().max(both.len());
+    Err(tr!("{n} processos com o mesmo comando; não dá para saber qual é com segurança", "{n} processes with the same command; cannot tell which one safely"))
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@
 //! acompanha os transcripts e envia um `Snapshot` para a UI a cada tick.
 
 use crate::actions::{self, Action, ProcCand};
+use crate::i18n::{t, tr};
 use crate::model::*;
 use crate::scan::{one_line, FileState, UsageSink};
 use chrono::{DateTime, Local, NaiveDate, TimeZone};
@@ -364,7 +365,7 @@ fn trim_minutes(u: &Usage) -> Usage {
 
 impl Collector {
     pub fn new() -> anyhow::Result<Self> {
-        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("não achei o diretório home"))?;
+        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!(t("não achei o diretório home", "home directory not found")))?;
         let claude_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| home.join(".claude"));
         Ok(Self {
             claude_dir,
@@ -441,22 +442,22 @@ impl Collector {
             Action::Launch(spec) if !spec.background => {
                 let title = spec.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "claude".into());
                 let msg = match actions::open_terminal(&spec.cwd, &title, &actions::launch_args(&spec)) {
-                    Ok(()) => format!("nova instância aberta em {}", spec.cwd),
-                    Err(e) => format!("falha ao abrir: {e}"),
+                    Ok(()) => tr!("nova instância aberta em {}", "new instance opened in {}", spec.cwd),
+                    Err(e) => tr!("falha ao abrir: {e}", "open failed: {e}"),
                 };
                 self.notify(msg);
             }
             Action::Resume { session_id, cwd, name } => {
                 let msg = match actions::open_terminal(&cwd, &name, &["--resume".into(), session_id]) {
-                    Ok(()) => format!("retomando {name} numa aba nova"),
-                    Err(e) => format!("falha ao retomar: {e}"),
+                    Ok(()) => tr!("retomando {name} numa aba nova", "resuming {name} in a new tab"),
+                    Err(e) => tr!("falha ao retomar: {e}", "resume failed: {e}"),
                 };
                 self.notify(msg);
             }
             Action::Attach { id, cwd, name } => {
                 let msg = match actions::open_terminal(&cwd, &name, &["attach".into(), id]) {
-                    Ok(()) => format!("abrindo {name} numa aba nova"),
-                    Err(e) => format!("falha ao abrir: {e}"),
+                    Ok(()) => tr!("abrindo {name} numa aba nova", "opening {name} in a new tab"),
+                    Err(e) => tr!("falha ao abrir: {e}", "open failed: {e}"),
                 };
                 self.notify(msg);
             }
@@ -466,16 +467,16 @@ impl Collector {
                 let _ = thread::Builder::new().name("action".into()).spawn(move || {
                     let msg = match slow {
                         Action::Launch(spec) => match actions::claude_cli(&actions::launch_args(&spec), Some(&spec.cwd)) {
-                            Ok(out) => format!("sessão em background iniciada: {}", one_line(&out, 120)),
-                            Err(e) => format!("falha ao iniciar em background: {}", one_line(&e, 160)),
+                            Ok(out) => tr!("sessão em background iniciada: {}", "background session started: {}", one_line(&out, 120)),
+                            Err(e) => tr!("falha ao iniciar em background: {}", "background start failed: {}", one_line(&e, 160)),
                         },
                         Action::StopBg { id, name } => match actions::claude_cli(&["stop".into(), id], None) {
-                            Ok(_) => format!("sessão {name} parada"),
-                            Err(e) => format!("falha ao parar {name}: {}", one_line(&e, 160)),
+                            Ok(_) => tr!("sessão {name} parada", "session {name} stopped"),
+                            Err(e) => tr!("falha ao parar {name}: {}", "could not stop {name}: {}", one_line(&e, 160)),
                         },
                         Action::RemoveBg { id, name } => match actions::claude_cli(&["rm".into(), id], None) {
-                            Ok(_) => format!("sessão {name} removida"),
-                            Err(e) => format!("falha ao remover {name}: {}", one_line(&e, 160)),
+                            Ok(_) => tr!("sessão {name} removida", "session {name} removed"),
+                            Err(e) => tr!("falha ao remover {name}: {}", "could not remove {name}: {}", one_line(&e, 160)),
                         },
                         _ => return,
                     };
@@ -491,16 +492,17 @@ impl Collector {
 
     pub fn stop_task(&mut self, sid: &str, tid: &str) -> String {
         let Some(t) = self.files.values().filter(|f| f.session_id == sid).find_map(|f| f.tasks.get(tid)).cloned() else {
-            return format!("task {tid} não encontrada");
+            return tr!("task {tid} não encontrada", "task {tid} not found");
         };
         if matches!(t.kind, TaskKind::Agent | TaskKind::Workflow) {
-            return format!(
+            return tr!(
                 "{} roda dentro do processo da sessão: não dá para parar só ele daqui. Use TaskStop na sessão ou encerre a sessão (painel 1, x)",
+                "{} runs inside the session's process: it cannot be stopped alone from here. Use TaskStop in the session or end the session (panel 1, x)",
                 t.kind.label()
             );
         }
         if t.effective_status(Local::now()).is_some() {
-            return format!("task {tid} já terminou");
+            return tr!("task {tid} já terminou", "task {tid} has already finished");
         }
         let children = children_map(&self.sys);
         // Candidatos: shells descendentes da sessão (ou de qualquer processo, se a
@@ -549,18 +551,18 @@ impl Collector {
             t.started.map(|x| x.timestamp()),
         ) {
             Ok(p) => p,
-            Err(e) => return format!("não parei {tid}: {e}"),
+            Err(e) => return tr!("não parei {tid}: {e}", "did not stop {tid}: {e}"),
         };
         let n = kill_tree(&self.sys, &children, Pid::from_u32(pid));
-        format!("{} {tid} parado (pid {pid}, {n} processos finalizados)", t.kind.label())
+        tr!("{} {tid} parado (pid {pid}, {n} processos finalizados)", "{} {tid} stopped (pid {pid}, {n} processes killed)", t.kind.label())
     }
 
     fn kill_session(&mut self, sid: &str) -> String {
         let Some(m) = self.metas.get(sid).cloned() else {
-            return "sessão sem processo conhecido".into();
+            return t("sessão sem processo conhecido", "session has no known process").into();
         };
         if !is_session_alive(&self.sys, &m) {
-            return format!("{} já não está rodando", m.name);
+            return tr!("{} já não está rodando", "{} is no longer running", m.name);
         }
         let children = children_map(&self.sys);
         // Não derrubar o próprio dashboard (se foi aberto de dentro desta sessão).
@@ -568,7 +570,7 @@ impl Collector {
         let mut cur = self.sys.process(me).and_then(|p| p.parent());
         while let Some(pp) = cur {
             if pp.as_u32() == m.pid {
-                return format!("o agent-dash está rodando dentro de {}: encerre-a pelo próprio terminal", m.name);
+                return tr!("o agent-dash está rodando dentro de {}: encerre-a pelo próprio terminal", "agent-dash is running inside {}: end it from its own terminal", m.name);
             }
             cur = self.sys.process(pp).and_then(|p| p.parent());
         }
@@ -579,7 +581,12 @@ impl Collector {
         if let Some(pp) = shell {
             actions::spawn_console_reset(pp.as_u32());
         }
-        format!("sessão {} encerrada (pid {}, {n} processos). Para retomar: `a` mostra as encerradas, `o` reabre", m.name, m.pid)
+        tr!(
+            "sessão {} encerrada (pid {}, {n} processos). Para retomar: `a` mostra as encerradas, `o` reabre",
+            "session {} ended (pid {}, {n} processes). To resume: `a` shows the ended ones, `o` reopens",
+            m.name,
+            m.pid
+        )
     }
 
     /// Diretórios conhecidos: os das sessões (mais recentes primeiro) e os
@@ -864,7 +871,7 @@ impl Collector {
             let first_prompt = st.events.iter().find(|e| e.kind == EventKind::Prompt).map(|e| one_line(&e.text, 120));
             agents.push(AgentInfo {
                 agent_id: aid,
-                agent_type: ms("agentType").unwrap_or_else(|| "agente".into()),
+                agent_type: ms("agentType").unwrap_or_else(|| t("agente", "agent").into()),
                 description: ms("description").or_else(|| ms("label")).or(first_prompt).unwrap_or_default(),
                 workflow: d.workflow.clone(),
                 session_id: d.session_id.clone(),
