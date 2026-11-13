@@ -189,9 +189,8 @@ pub struct Snapshot {
     pub daily: BTreeMap<NaiveDate, Tokens>,
     /// Uso por dia de cada agente ("Claude", "Antigravity"…).
     pub daily_by_agent: BTreeMap<NaiveDate, BTreeMap<String, Tokens>>,
-    pub daily_by_model: BTreeMap<NaiveDate, BTreeMap<String, Tokens>>,
-    /// Modelo -> agente que o usou (para agrupar e filtrar a tabela de modelos).
-    pub model_agent: BTreeMap<String, String>,
+    /// Uso por dia de cada modelo, separado por agente (dia -> agente -> modelo).
+    pub daily_by_model: BTreeMap<NaiveDate, BTreeMap<String, BTreeMap<String, Tokens>>>,
     /// Sessões com consumo no dia, por agente.
     pub daily_sessions: BTreeMap<NaiveDate, BTreeMap<String, usize>>,
     /// Tokens por minuto na última hora, todas as sessões (60 posições).

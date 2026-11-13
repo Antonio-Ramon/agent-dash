@@ -191,7 +191,9 @@ fn draw_stacked(f: &mut Frame, area: Rect, bars: &[StackBar], bar_w: u16, gap: u
                     _ => (EIGHTHS[8], a, Color::Reset),
                 }
             } else {
-                (EIGHTHS[(top - lo) as usize], a, Color::Reset)
+                // ponytail: célula do topo com duas partes usa a cor de cima, para a parte
+                // pequena não sumir; a de baixo perde menos de uma linha.
+                (EIGHTHS[(top - lo) as usize], at(top - 1).unwrap_or(a), Color::Reset)
             };
             for x in x0..x0 + bar_w {
                 buf[(x, y)].set_symbol(sym).set_fg(fg).set_bg(bg);
@@ -1493,11 +1495,8 @@ fn draw_usage_main(f: &mut Frame, area: Rect, app: &mut App) {
             .snap
             .daily_by_model
             .get(&day)
-            .map(|mm| {
-                mm.iter()
-                    .filter(|(m, t)| t.total() > 0 && app.snap.model_agent.get(*m).map_or(CLAUDE, String::as_str) == agent.as_str())
-                    .collect()
-            })
+            .and_then(|a| a.get(agent.as_str()))
+            .map(|mm| mm.iter().filter(|(_, t)| t.total() > 0).collect())
             .unwrap_or_default();
         v.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
         for (m, t) in v {
@@ -1640,4 +1639,20 @@ fn draw_help(f: &mut Frame) {
         ),
         r,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parte_pequena_no_topo_nao_some() {
+        let bar = |segs: Vec<(u64, Color)>| StackBar { label: String::new(), segs, selected: false };
+        // A segunda barra termina em 13/8 (Claude) + 1/8 (outro agente): as duas no mesmo topo.
+        let bars = [bar(vec![(24, Color::Magenta)]), bar(vec![(13, Color::Magenta), (1, Color::Cyan)])];
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(10, 4)).unwrap();
+        term.draw(|f| draw_stacked(f, f.area(), &bars, 3, 1, Color::Yellow)).unwrap();
+        let cell = &term.backend().buffer()[(4, 1)];
+        assert_eq!((cell.symbol(), cell.fg), ("▆", Color::Cyan));
+    }
 }

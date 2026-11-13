@@ -135,7 +135,8 @@ pub fn merge(mut base: Vec<AgentDef>, user: Vec<AgentDef>) -> Vec<AgentDef> {
         }
         match base.iter_mut().find(|b| b.name.eq_ignore_ascii_case(&u.name)) {
             Some(b) if b.is_claude() => {} // o Claude é a base do dashboard; não dá para trocar
-            Some(b) => *b = u,
+            // Fica o nome de fábrica: o coletor e os chats comparam por ele.
+            Some(b) => *b = AgentDef { name: std::mem::take(&mut b.name), ..u },
             None => base.push(u),
         }
     }
@@ -257,7 +258,7 @@ mod tests {
         .unwrap();
         let v = merge(builtin(), user);
         let names: Vec<&str> = v.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, vec!["Claude", "antigravity", "Codex", "Aider"]);
+        assert_eq!(names, vec!["Claude", "Antigravity", "Codex", "Aider"]);
         assert_eq!(v[0].command, "claude");
         assert_eq!(v[1].model_choices(), vec!["padrão", "modelo-novo"]);
         assert_eq!(v[1].launch_args(Some("modelo-novo"), None), vec!["-m", "modelo-novo"]);

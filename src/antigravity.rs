@@ -111,10 +111,26 @@ fn to_local(t: SystemTime) -> Option<DateTime<Local>> {
     Local.timestamp_opt(d.as_secs() as i64, d.subsec_nanos()).single()
 }
 
-/// `file:///C:/Users/x` -> `C:\Users\x`.
+/// `file:///C:/Users/x` -> `C:\Users\x`, com os `%XX` decodificados (acento
+/// vem como bytes UTF-8, ex.: `%C3%81` = `Á`).
 fn uri_to_path(u: &str) -> String {
-    let p = u.strip_prefix("file:///").unwrap_or(u);
-    let p = p.replace("%20", " ");
+    let b = u.strip_prefix("file:///").unwrap_or(u).as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = b.get(i + 1..i + 3).filter(|h| b[i] == b'%' && h.iter().all(u8::is_ascii_hexdigit));
+        match hex.and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok()) {
+            Some(x) => {
+                out.push(x);
+                i += 3;
+            }
+            None => {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+    }
+    let p = String::from_utf8_lossy(&out);
     if cfg!(windows) { p.replace('/', "\\") } else { format!("/{p}") }
 }
 
@@ -374,14 +390,19 @@ impl Antigravity {
             })
             .collect();
         locks.sort_by(|a, b| b.0.cmp(&a.0));
-        let mut owners = HashMap::new();
-        for (_, id, p) in locks.into_iter().take(MAX_LOCKS) {
-            if let Some(pid) = lock_holders(&p).into_iter().find(|pid| agy.contains(pid)) {
-                owners.insert(id, pid);
-            }
-            // Todos os `agy` já têm conversa: não precisa olhar as outras.
-            if owners.len() >= agy.len() {
+        locks.truncate(MAX_LOCKS);
+        // Cada consulta leva uns 20 ms. Uma só, com todos os arquivos, diz quais
+        // `agy` travam alguma conversa; um `agy` sem conversa não trava nenhum,
+        // então não adianta procurar o dele arquivo por arquivo.
+        let paths: Vec<&Path> = locks.iter().map(|l| l.2.as_path()).collect();
+        let holding: Vec<u32> = lock_holders(&paths).into_iter().filter(|p| agy.contains(p)).collect();
+        let mut owners: HashMap<String, u32> = HashMap::new();
+        for (_, id, p) in locks {
+            if holding.iter().all(|h| owners.values().any(|v| v == h)) {
                 break;
+            }
+            if let Some(pid) = lock_holders(&[p.as_path()]).into_iter().find(|pid| holding.contains(pid)) {
+                owners.insert(id, pid);
             }
         }
         self.owners = owners;
@@ -521,11 +542,11 @@ impl Antigravity {
     }
 }
 
-/// Processos que estão com o arquivo `path` aberto, pela Restart Manager do
+/// Processos que estão com algum dos arquivos `paths` aberto, pela Restart Manager do
 /// Windows. Só consulta. A DLL é carregada em tempo de execução (o toolchain
 /// GNU não traz a biblioteca de importação dela).
 #[cfg(windows)]
-pub fn lock_holders(path: &Path) -> Vec<u32> {
+pub fn lock_holders(paths: &[&Path]) -> Vec<u32> {
     use std::ffi::c_void;
     use std::os::windows::ffi::OsStrExt;
 
@@ -577,10 +598,10 @@ pub fn lock_holders(path: &Path) -> Vec<u32> {
         if start(&mut handle, 0, key.as_mut_ptr()) != 0 {
             return Vec::new();
         }
-        let file: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-        let files = [file.as_ptr()];
+        let wides: Vec<Vec<u16>> = paths.iter().map(|p| p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()).collect();
+        let files: Vec<*const u16> = wides.iter().map(|w| w.as_ptr()).collect();
         let mut out = Vec::new();
-        if register(handle, 1, files.as_ptr(), 0, std::ptr::null(), 0, std::ptr::null()) == 0 {
+        if !files.is_empty() && register(handle, files.len() as u32, files.as_ptr(), 0, std::ptr::null(), 0, std::ptr::null()) == 0 {
             let empty = ProcessInfo {
                 process: UniqueProcess { pid: 0, start_low: 0, start_high: 0 },
                 app_name: [0; 256],
@@ -590,12 +611,20 @@ pub fn lock_holders(path: &Path) -> Vec<u32> {
                 ts_session: 0,
                 restartable: 0,
             };
-            let mut buf = vec![empty; 8];
-            let (mut needed, mut n, mut reasons) = (0u32, buf.len() as u32, 0u32);
-            // ERROR_MORE_DATA (234): mais de 8 processos; os 8 primeiros bastam.
-            let rc = get_list(handle, &mut needed, &mut n, buf.as_mut_ptr(), &mut reasons);
-            if rc == 0 || rc == 234 {
-                out.extend(buf.iter().take(n as usize).map(|p| p.process.pid));
+            let mut buf = vec![empty; 16];
+            let (mut needed, mut n, mut reasons) = (0u32, 0u32, 0u32);
+            let mut rc = 0;
+            // ERROR_MORE_DATA (234): não coube; tenta de novo com o tamanho pedido.
+            for _ in 0..3 {
+                n = buf.len() as u32;
+                rc = get_list(handle, &mut needed, &mut n, buf.as_mut_ptr(), &mut reasons);
+                if rc != 234 {
+                    break;
+                }
+                buf.resize(needed as usize + 4, empty);
+            }
+            if rc == 0 {
+                out.extend(buf.iter().take((n as usize).min(buf.len())).map(|p| p.process.pid));
             }
         }
         end(handle);
@@ -604,7 +633,7 @@ pub fn lock_holders(path: &Path) -> Vec<u32> {
 }
 
 #[cfg(not(windows))]
-pub fn lock_holders(_path: &Path) -> Vec<u32> {
+pub fn lock_holders(_paths: &[&Path]) -> Vec<u32> {
     Vec::new()
 }
 
@@ -616,6 +645,7 @@ mod tests {
     fn caminho_do_uri() {
         if cfg!(windows) {
             assert_eq!(uri_to_path("file:///C:/Users/fulano/Meus%20Docs"), "C:\\Users\\fulano\\Meus Docs");
+            assert_eq!(uri_to_path("file:///c%3A/Users/x/%C3%81rea%20de%20Trabalho/100%"), "c:\\Users\\x\\Área de Trabalho\\100%");
         }
     }
 
@@ -673,11 +703,17 @@ mod tests {
     fn restart_manager_acha_quem_abriu() {
         let p = std::env::temp_dir().join(format!("agent-dash-rm-{}.lock", std::process::id()));
         fs::write(&p, b"").unwrap();
-        assert!(!lock_holders(&p).contains(&std::process::id()));
+        let outro = std::env::temp_dir().join(format!("agent-dash-rm-{}-2.lock", std::process::id()));
+        fs::write(&outro, b"").unwrap();
+        assert!(!lock_holders(&[p.as_path()]).contains(&std::process::id()));
         let f = fs::File::open(&p).unwrap();
-        assert!(lock_holders(&p).contains(&std::process::id()));
+        assert!(lock_holders(&[p.as_path()]).contains(&std::process::id()));
+        // Vários arquivos numa consulta só: basta um estar aberto.
+        assert!(lock_holders(&[outro.as_path(), p.as_path()]).contains(&std::process::id()));
+        assert!(!lock_holders(&[outro.as_path()]).contains(&std::process::id()));
         drop(f);
         let _ = fs::remove_file(&p);
+        let _ = fs::remove_file(&outro);
     }
 
     /// Manual, contra o `~/.gemini` de verdade: `cargo test agy_real -- --ignored --nocapture`.

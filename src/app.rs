@@ -1188,8 +1188,9 @@ impl App {
         }
         if let Some(agent) = &s.agent {
             if s.alive {
-                self.flash(format!(
+                self.flash(tr!(
                     "{} está aberta em outro terminal (pid {}). Para conversar aqui: x encerra, depois Enter retoma no painel",
+                    "{} is open in another terminal (pid {}). To chat here: x ends it, then Enter resumes it in the panel",
                     s.name,
                     s.pid.unwrap_or(0)
                 ));
@@ -1370,8 +1371,17 @@ impl App {
                     self.confirm = Some(Confirm {
                         title: tr!("Fechar o chat {}", "Close the chat {}", s.name),
                         body: vec![
-                            tr!("Finaliza o {} que roda aqui no painel (pid {}).", "Kills the {} running here in the panel (pid {}).", s.status, s.pid.unwrap_or(0)),
-                            "O dashboard não guarda a conversa de outros agentes; se o agente salva histórico, ele fica onde o agente guarda.".into(),
+                            tr!(
+                                "Finaliza o {} que roda aqui no painel (pid {}).",
+                                "Kills the {} running here in the panel (pid {}).",
+                                s.agent.as_deref().unwrap_or(&s.name),
+                                s.pid.unwrap_or(0)
+                            ),
+                            t(
+                                "O dashboard não guarda a conversa de outros agentes; se o agente salva histórico, ele fica onde o agente guarda.",
+                                "The dashboard does not keep other agents' conversations; if the agent saves history, it stays where the agent keeps it.",
+                            )
+                            .into(),
                         ],
                         action: None,
                         quit: false,
@@ -1385,11 +1395,15 @@ impl App {
                     // Outro agente aberto em outro terminal: encerra o processo dele.
                     let mut body = vec![
                         tr!("Finaliza o processo {} ({agent}) e os filhos dele ({} processos).", "Kills process {} ({agent}) and its children ({} processes).", s.pid.unwrap_or(0), s.procs.len()),
-                        "O que estiver sendo feito agora é interrompido.".into(),
-                        "A conversa fica salva: depois, `a` mostra as encerradas e Enter ou `o` retoma.".into(),
+                        t("O que estiver sendo feito agora é interrompido.", "Whatever it is doing right now is interrupted.").into(),
+                        t(
+                            "A conversa fica salva: depois, `a` mostra as encerradas e Enter ou `o` retoma.",
+                            "The conversation stays saved: later, `a` shows the ended ones and Enter or `o` resumes it.",
+                        )
+                        .into(),
                     ];
                     if s.status == "busy" {
-                        body.insert(0, "⚠ A sessão está ocupada neste momento.".into());
+                        body.insert(0, t("⚠ A sessão está ocupada neste momento.", "⚠ The session is busy right now.").into());
                     }
                     self.ask(tr!("Encerrar a sessão {}", "End the session {}", s.name), body, Action::KillAgent { session_id: s.session_id.clone() });
                     return;
@@ -2092,8 +2106,10 @@ mod tests {
         total.add(&agy);
         snap.daily.insert(today, total);
         snap.daily_by_agent.insert(today, [(CLAUDE.to_string(), claude), ("Antigravity".to_string(), agy)].into());
-        snap.daily_by_model.insert(today, [("claude-opus-5-5".to_string(), claude), ("gemini-teste".to_string(), agy)].into());
-        snap.model_agent = [("claude-opus-5-5".to_string(), CLAUDE.to_string()), ("gemini-teste".to_string(), "Antigravity".to_string())].into();
+        snap.daily_by_model.insert(
+            today,
+            [(CLAUDE.to_string(), [("claude-opus-5-5".to_string(), claude)].into()), ("Antigravity".to_string(), [("gemini-teste".to_string(), agy)].into())].into(),
+        );
         snap.per_minute = vec![0; 60];
         let mut app = App::new();
         app.set_snapshot(snap);

@@ -138,8 +138,8 @@ struct Global {
     msgs: HashMap<String, Counted>,
     daily: BTreeMap<NaiveDate, Tokens>,
     daily_agent: BTreeMap<NaiveDate, BTreeMap<String, Tokens>>,
-    daily_model: BTreeMap<NaiveDate, BTreeMap<String, Tokens>>,
-    model_agent: BTreeMap<String, String>,
+    /// dia -> agente -> modelo -> tokens (o mesmo modelo pode vir de dois agentes).
+    daily_model: BTreeMap<NaiveDate, BTreeMap<String, BTreeMap<String, Tokens>>>,
     /// dia -> agente -> sessões.
     daily_sessions: BTreeMap<NaiveDate, BTreeMap<String, HashSet<String>>>,
     /// agente -> minuto -> tokens.
@@ -163,7 +163,7 @@ impl Global {
             if let Some(x) = self.daily_agent.get_mut(&old.day).and_then(|m| m.get_mut(&old.agent)) {
                 x.sub(&old.tokens);
             }
-            if let Some(x) = self.daily_model.get_mut(&old.day).and_then(|mm| mm.get_mut(&old.model)) {
+            if let Some(x) = self.daily_model.get_mut(&old.day).and_then(|a| a.get_mut(&old.agent)).and_then(|mm| mm.get_mut(&old.model)) {
                 x.sub(&old.tokens);
             }
             if let Some(x) = self.per_minute.get_mut(&old.agent).and_then(|m| m.get_mut(&old.minute)) {
@@ -172,8 +172,7 @@ impl Global {
         }
         self.daily.entry(day).or_default().add(&t);
         self.daily_agent.entry(day).or_default().entry(agent.to_string()).or_default().add(&t);
-        self.daily_model.entry(day).or_default().entry(model.to_string()).or_default().add(&t);
-        self.model_agent.entry(model.to_string()).or_insert_with(|| agent.to_string());
+        self.daily_model.entry(day).or_default().entry(agent.to_string()).or_default().entry(model.to_string()).or_default().add(&t);
         self.daily_sessions.entry(day).or_default().entry(agent.to_string()).or_default().insert(sid.to_string());
         *self.per_minute.entry(agent.to_string()).or_default().entry(minute).or_default() += t.total();
         self.msgs.insert(id.to_string(), Counted { agent: agent.to_string(), day, model: model.to_string(), tokens: t, minute });
@@ -1048,7 +1047,6 @@ impl Collector {
             daily: self.global.daily.clone(),
             daily_by_agent: self.global.daily_agent.clone(),
             daily_by_model: self.global.daily_model.clone(),
-            model_agent: self.global.model_agent.clone(),
             daily_sessions: self
                 .global
                 .daily_sessions
@@ -1109,5 +1107,27 @@ pub fn run(tx: Sender<Snapshot>, rx: Receiver<Ctl>) {
             Ok(Ctl::Refresh) => c.poke_bg(),
             Err(RecvTimeoutError::Timeout) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mesmo_modelo_em_dois_agentes_fica_separado() {
+        let mut g = Global::default();
+        let ts = Some(Local::now());
+        let day = Local::now().date_naive();
+        let t = |n| Tokens { input: n, ..Default::default() };
+        g.add(CLAUDE, "s1", "a", ts, "claude-sonnet-4-6", t(100));
+        g.add("Antigravity", "s2", "b", ts, "claude-sonnet-4-6", t(7));
+        let m = &g.daily_model[&day];
+        assert_eq!(m[CLAUDE]["claude-sonnet-4-6"].input, 100);
+        assert_eq!(m["Antigravity"]["claude-sonnet-4-6"].input, 7);
+        // Correção de uma resposta já contada sai do agente certo.
+        g.add("Antigravity", "s2", "b", ts, "claude-sonnet-4-6", t(9));
+        assert_eq!(g.daily_model[&day]["Antigravity"]["claude-sonnet-4-6"].input, 9);
+        assert_eq!(g.daily_model[&day][CLAUDE]["claude-sonnet-4-6"].input, 100);
     }
 }
