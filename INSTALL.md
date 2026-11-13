@@ -1,6 +1,7 @@
 # agent-dash: instalação e uso
 
-Guia para quem baixou o repositório e quer ter o `agent-dash` no próprio PC.
+Guia para ter o `agent-dash` no próprio PC. Para só usar, basta o executável pronto (seção 3.1):
+não precisa de Rust nem de Git.
 Para detalhes de funcionamento (de onde vêm os dados, como os tokens são contados), veja o [README](README.md).
 
 ## 1. O que você precisa
@@ -9,13 +10,16 @@ Para detalhes de funcionamento (de onde vêm os dados, como os tokens são conta
 |---|---|---|
 | **Windows 10 ou 11** | O dashboard usa recursos do Windows (pseudo-terminal ConPTY, área de transferência, Explorer). Não foi testado em Linux nem macOS. | — |
 | **Claude Code** instalado e no PATH | É ele que o dashboard monitora e abre. | `claude --version` |
-| **Git** | Para baixar o repositório. | `git --version` |
-| **Rust 1.88 ou mais novo, pelo rustup** (toolchain GNU recomendado) | Para compilar. Ter "algum" Rust não basta: a seção 2 mostra como conferir. | `where.exe cargo` e `rustc -vV` |
+| **Git** (só para compilar) | Para baixar o repositório (seção 3.2). | `git --version` |
+| **Rust 1.88 ou mais novo, pelo rustup** (só para compilar) | Para compilar (seção 3.2). Ter "algum" Rust não basta: a seção 2 mostra como conferir. | `where.exe cargo` e `rustc -vV` |
 | **Windows Terminal** (recomendado) | Cores, símbolos e a opção "aba nova" funcionam melhor nele. Sem ele, "aba nova" abre uma janela de console comum. | `wt --version` |
 
 Com o toolchain GNU, não precisa de Visual Studio nem de MinGW.
 
 ## 2. Preparar o Rust
+
+> Só para quem vai compilar (seção 3.2). Para usar o executável pronto, pule para a
+> [seção 3.1](#31-baixar-o-executável-recomendado).
 
 O agent-dash compila com o Rust na variante **GNU** (`x86_64-pc-windows-gnu`), que não depende do
 Visual Studio. A variante **MSVC** também funciona, mas só se o Visual Studio tiver o componente
@@ -40,7 +44,7 @@ Compare com a tabela de cima para baixo e pare na primeira linha que bater:
 | `where.exe` não encontra `cargo` | Sem Rust | [2.2](#22-instalar-o-rustup-com-o-toolchain-gnu) |
 | A primeira linha é `C:\Program Files\Rust ...\bin\cargo.exe` | Rust do instalador MSI. Vem na variante MSVC, sem rustup, e não dá para trocar de variante | [2.3](#23-rust-instalado-pelo-msi) |
 | A primeira linha é `...\.cargo\bin\cargo.exe` e `host: x86_64-pc-windows-msvc` | rustup na variante MSVC | [2.4](#24-rustup-na-variante-msvc) |
-| A primeira linha é `...\.cargo\bin\cargo.exe` e `host: x86_64-pc-windows-gnu` | Pronto | Siga para a [seção 3](#3-baixar-e-instalar-o-agent-dash) |
+| A primeira linha é `...\.cargo\bin\cargo.exe` e `host: x86_64-pc-windows-gnu` | Pronto | Siga para a [3.2](#32-compilar-a-partir-do-código) |
 
 ### 2.2 Instalar o rustup com o toolchain GNU
 
@@ -91,7 +95,25 @@ PowerShell (veja a seção 3).
 
 ## 3. Baixar e instalar o agent-dash
 
-Pelo **PowerShell**:
+### 3.1 Baixar o executável (recomendado)
+
+Cada release traz o `agent-dash.exe` pronto, sem dependências. Cole num **PowerShell**:
+
+```powershell
+$dir = "$env:LOCALAPPDATA\Programs\agent-dash"
+New-Item -ItemType Directory -Force $dir | Out-Null
+Invoke-WebRequest https://github.com/Antonio-Ramon/agent-dash/releases/latest/download/agent-dash.exe -OutFile "$dir\agent-dash.exe"
+$p = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($p -notlike "*$dir*") { [Environment]::SetEnvironmentVariable("Path", "$p;$dir", "User") }
+```
+
+- O executável fica em `%LOCALAPPDATA%\Programs\agent-dash`, e essa pasta entra no PATH do seu usuário.
+  Rodar de novo não duplica o PATH.
+- O PATH novo só vale nos terminais abertos depois. Abra um terminal novo antes de conferir (abaixo).
+
+### 3.2 Compilar a partir do código
+
+Precisa do Rust preparado (seção 2). Pelo **PowerShell**:
 
 ```powershell
 git clone https://github.com/Antonio-Ramon/agent-dash.git
@@ -223,9 +245,13 @@ Quem desenvolve: uma versão nova é publicada quando o `version` do `Cargo.toml
 ## 7. Desinstalar
 
 ```powershell
-cargo uninstall agent-dash
-Remove-Item -Recurse "$env:LOCALAPPDATA\agent-dash"   # lista de itens limpos com `d`
+Remove-Item -Recurse "$env:LOCALAPPDATA\Programs\agent-dash"   # se instalou pelo executável (3.1)
+cargo uninstall agent-dash                                     # se compilou (3.2)
+Remove-Item -Recurse "$env:LOCALAPPDATA\agent-dash"            # lista de itens limpos com `d`
 ```
+
+Quem instalou pelo executável pode também tirar `%LOCALAPPDATA%\Programs\agent-dash` do PATH
+(Configurações > Sistema > Sobre > Configurações avançadas do sistema > Variáveis de Ambiente).
 
 O agent-dash só lê `~/.claude`; desinstalar não apaga nenhuma conversa.
 
@@ -233,7 +259,7 @@ O agent-dash só lê `~/.claude`; desinstalar não apaga nenhuma conversa.
 
 | Sintoma | Causa e solução |
 |---|---|
-| `agent-dash` não é reconhecido como comando | Abra um terminal novo. Se continuar, confira se `%USERPROFILE%\.cargo\bin` está no PATH. |
+| `agent-dash` não é reconhecido como comando | Abra um terminal novo. Se continuar, confira se a pasta do executável está no PATH: `%LOCALAPPDATA%\Programs\agent-dash` (3.1) ou `%USERPROFILE%\.cargo\bin` (3.2). |
 | `error calling dlltool 'dlltool.exe': program not found` ao compilar | Faltou o `--locked`. Rode `cargo install --locked --path .`. Não rode `cargo update`: ele desfaz as versões fixadas no `Cargo.lock`. |
 | `error: linker 'link.exe' not found` ao compilar | Seu Rust está na variante MSVC sem o componente de C++ do Visual Studio. Rode `rustup default stable-x86_64-pc-windows-gnu` e instale de novo. Se `rustup` não for reconhecido, seu Rust veio do MSI: veja a [2.3](#23-rust-instalado-pelo-msi). |
 | `link: extra operand '...rcgu.o'` ao compilar | Você compilou pelo Git Bash com o toolchain MSVC, e o `link` chamado foi o do Git. Mude para o toolchain GNU (seção 2) ou compile pelo PowerShell. |
