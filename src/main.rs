@@ -8,7 +8,7 @@ mod term;
 mod ui;
 mod update;
 
-use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseButton, MouseEventKind};
+use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::crossterm::execute;
 use std::sync::mpsc;
 use std::thread;
@@ -129,6 +129,9 @@ fn main() -> anyhow::Result<()> {
     }
     if args.iter().any(|a| a == "--chat-test") {
         return chat_test();
+    }
+    if args.iter().any(|a| a == "--paste-probe") {
+        return paste_probe();
     }
     if let Some(i) = args.iter().position(|a| a == "--frame") {
         // Depuração: renderiza cada painel em memória e imprime (não precisa de TTY).
@@ -272,27 +275,9 @@ fn run_tui() -> anyhow::Result<()> {
             }
             // Com chat aberto, acorda rápido para mostrar o que o Claude escreve.
             let wait = if app.terms.is_empty() { 100 } else { 3 };
-            let mut keys = Vec::new();
-            let mut mouse = Vec::new();
-            if event::poll(Duration::from_millis(wait))? {
-                loop {
-                    match event::read()? {
-                        Event::Key(k) if k.kind != KeyEventKind::Release => keys.push(k),
-                        // Movimento chega aos montes e não muda nada: ignora sem redesenhar.
-                        // Arrastar com o botão esquerdo seleciona texto no chat.
-                        Event::Mouse(m) if !matches!(m.kind, MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Right | MouseButton::Middle)) => {
-                            mouse.push(m)
-                        }
-                        Event::Resize(..) => need_draw = true,
-                        _ => {}
-                    }
-                    if !event::poll(Duration::ZERO)? {
-                        break;
-                    }
-                }
-            }
-            need_draw |= !keys.is_empty();
-            if app.chat_focus && keys.len() >= 8 {
+            let (keys, mouse, resized) = read_batch(wait, app.chat_focus)?;
+            need_draw |= resized || !keys.is_empty();
+            if app.chat_focus && keys.len() >= PASTE_KEYS {
                 app.chat_paste(&keys);
             } else {
                 for k in keys {
@@ -311,6 +296,79 @@ fn run_tui() -> anyhow::Result<()> {
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
+}
+
+/// A partir de quantas teclas num lote só o chat trata como texto colado.
+const PASTE_KEYS: usize = 8;
+
+/// Lê os eventos que já chegaram. Com o chat em foco, só fecha o lote depois
+/// de um silêncio: a colagem chega aos pedaços, e o Claude só a resume em
+/// "[Pasted text]" quando ela vai num bloco só.
+fn read_batch(wait: u64, chat: bool) -> std::io::Result<(Vec<KeyEvent>, Vec<MouseEvent>, bool)> {
+    let (mut keys, mut mouse, mut resized) = (Vec::new(), Vec::new(), false);
+    if !event::poll(Duration::from_millis(wait))? {
+        return Ok((keys, mouse, resized));
+    }
+    loop {
+        match event::read()? {
+            Event::Key(k) if k.kind != KeyEventKind::Release => keys.push(k),
+            // Movimento chega aos montes e não muda nada: ignora sem redesenhar.
+            // Arrastar com o botão esquerdo seleciona texto no chat.
+            Event::Mouse(m) if !matches!(m.kind, MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Right | MouseButton::Middle)) => mouse.push(m),
+            Event::Resize(..) => resized = true,
+            _ => {}
+        }
+        // ponytail: silêncio fixo. 5 ms ao digitar (não se sente); 50 ms quando já parece colagem.
+        let quiet = match (chat, keys.len()) {
+            (false, _) | (true, 0) => 0,
+            (true, 1..PASTE_KEYS) => 5,
+            _ => 50,
+        };
+        if !event::poll(Duration::from_millis(quiet))? {
+            return Ok((keys, mouse, resized));
+        }
+    }
+}
+
+/// Depuração: lê o teclado como o painel lê com o chat em foco e diz em
+/// quantos lotes um texto colado chegou (1 = vai inteiro para o Claude).
+/// Só o terminal de verdade reproduz: num pseudo-terminal a colagem sempre
+/// chega de uma vez.
+fn paste_probe() -> anyhow::Result<()> {
+    println!("Cole um texto grande aqui (uma vez só). Em 10 s mostro como ele chegou.");
+    ratatui::crossterm::terminal::enable_raw_mode()?;
+    // Lê como a regra antiga (fecha o lote quando a fila esvazia) e mede a
+    // pausa entre teclas: é ela que decide se 50 ms de silêncio bastam.
+    let (mut teclas, mut lotes, mut acima, mut maior) = (0, 0, 0, Duration::ZERO);
+    let mut ultima: Option<Instant> = None;
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(10) {
+        if !event::poll(Duration::from_millis(100))? {
+            continue;
+        }
+        let mut no_lote = 0;
+        loop {
+            if let Event::Key(k) = event::read()? {
+                if k.kind != KeyEventKind::Release {
+                    let agora = Instant::now();
+                    if let Some(u) = ultima {
+                        maior = maior.max(agora - u);
+                        acima += usize::from(agora - u > Duration::from_millis(50));
+                    }
+                    ultima = Some(agora);
+                    no_lote += 1;
+                }
+            }
+            if !event::poll(Duration::ZERO)? {
+                break;
+            }
+        }
+        teclas += no_lote;
+        lotes += usize::from(no_lote > 0);
+    }
+    ratatui::crossterm::terminal::disable_raw_mode()?;
+    println!("teclas={teclas} lotes_regra_antiga={lotes} maior_pausa={}ms lotes_com_50ms={}", maior.as_millis(), acima + 1);
+    Ok(())
 }
 
 /// Depuração: abre um `claude` num terminal embutido, manda uma mensagem e
