@@ -148,6 +148,7 @@ Na primeira abertura o cabeçalho mostra "lendo histórico N%" enquanto o histó
 | `●` ciano | sessão rodando um comando de shell |
 | `◐` | sessão em background parada, esperando uma resposta sua |
 | `○` | sessão encerrada (aparece com `a`) |
+| `◆` / `◇` | sessão de outro agente (Antigravity, Codex): mesmas cores do `●` / encerrada |
 | `▣` | sessão com chat aberto dentro do dashboard |
 | `⚑n` / `⚙n` | agentes / tasks rodando naquela sessão |
 | `✓` `✗` `◌` `?` | task concluída / interrompida ou com falha / monitor expirado / órfã |
@@ -156,13 +157,20 @@ Na primeira abertura o cabeçalho mostra "lendo histórico N%" enquanto o histó
 
 ### Acompanhar o consumo
 - Painel `1`: tokens de cada sessão; a aba **Resumo** detalha entrada, cache, saída e contexto atual.
+  Vale também para as sessões do Antigravity (os tokens aparecem depois da primeira resposta).
 - Painel `4`: tokens por dia; `↑` `↓` escolhem o dia e a direita mostra o consumo por modelo.
+- Com mais de um agente (Claude e Antigravity), as barras ficam empilhadas com uma cor por agente,
+  o cabeçalho mostra um número por agente e a tabela agrupa os modelos por agente.
+- `v` alterna entre todos os agentes e um só (cabeçalho, barras, totais e tabela).
 
 ### Abrir uma instância nova
 1. Aperte `n`.
 2. Escolha o repositório (digite para filtrar, `↑` `↓` para escolher) ou digite um caminho.
-3. `Tab` vai para os outros campos: modelo, modo (**aqui no painel**, aba nova do terminal ou background), nome e prompt inicial. `←` `→` trocam modelo e modo.
+3. `Tab` vai para os outros campos: agente (Claude, Antigravity, Codex), modelo, modo (**aqui no painel**, aba nova do terminal ou, só no Claude, background), nome e prompt inicial. `←` `→` trocam agente, modelo e modo.
 4. `Enter` inicia.
+
+Agente que não está instalado aparece riscado, com o comando para instalar embaixo. O Codex, por
+exemplo, instala com `npm install -g @openai/codex`. Detalhes no [README](README.md#outros-agentes-antigravity-codex).
 
 ### Conversar dentro do dashboard
 - `Enter` numa sessão entra no chat dela. Funciona para sessões abertas pelo dashboard, encerradas (são retomadas) e em background.
@@ -182,6 +190,7 @@ Na primeira abertura o cabeçalho mostra "lendo histórico N%" enquanto o histó
 |---|---|
 | `a` | mostrar também o que já terminou nas últimas 24h |
 | `f` | agentes e tasks só da sessão selecionada |
+| `v` | uso de tokens: todos os agentes ou um só |
 | `o` | sessão: abrir numa aba nova do terminal · task: abrir a saída no Bloco de Notas |
 | `e` | abrir a pasta da sessão no Explorer |
 | `c` | copiar (`claude --resume <id>`, id do agente, caminho da saída) |

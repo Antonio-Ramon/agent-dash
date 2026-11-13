@@ -2,6 +2,7 @@
 //! acompanha os transcripts e envia um `Snapshot` para a UI a cada tick.
 
 use crate::actions::{self, Action, ProcCand};
+use crate::antigravity::{self, AgyConv, Antigravity};
 use crate::i18n::{t, tr};
 use crate::model::*;
 use crate::scan::{one_line, FileState, UsageSink};
@@ -121,40 +122,67 @@ fn children_map(sys: &System) -> HashMap<Pid, Vec<Pid>> {
 
 const RECENT: Duration = Duration::from_secs(24 * 3600);
 
+/// Resposta já contada: onde ela entrou nos totais.
+#[derive(Clone)]
+struct Counted {
+    agent: String,
+    day: NaiveDate,
+    model: String,
+    tokens: Tokens,
+    minute: i64,
+}
+
 #[derive(Default)]
 struct Global {
-    /// id da resposta -> (dia, modelo, tokens, minuto)
-    msgs: HashMap<String, (NaiveDate, String, Tokens, i64)>,
+    /// id da resposta -> onde foi contada (para não contar duas vezes).
+    msgs: HashMap<String, Counted>,
     daily: BTreeMap<NaiveDate, Tokens>,
+    daily_agent: BTreeMap<NaiveDate, BTreeMap<String, Tokens>>,
     daily_model: BTreeMap<NaiveDate, BTreeMap<String, Tokens>>,
-    daily_sessions: BTreeMap<NaiveDate, HashSet<String>>,
-    per_minute: BTreeMap<i64, u64>,
+    model_agent: BTreeMap<String, String>,
+    /// dia -> agente -> sessões.
+    daily_sessions: BTreeMap<NaiveDate, BTreeMap<String, HashSet<String>>>,
+    /// agente -> minuto -> tokens.
+    per_minute: BTreeMap<String, BTreeMap<i64, u64>>,
+}
+
+impl Global {
+    /// Conta (ou corrige) uma resposta de `agent`. `id` precisa ser único
+    /// entre todos os agentes.
+    fn add(&mut self, agent: &str, sid: &str, id: &str, ts: Option<DateTime<Local>>, model: &str, t: Tokens) {
+        let Some(ts) = ts else { return };
+        let day = ts.date_naive();
+        let minute = ts.timestamp().div_euclid(60);
+        if let Some(old) = self.msgs.get(id).cloned() {
+            if old.tokens == t {
+                return; // mesma resposta já contada (ex.: sessão retomada copia o histórico)
+            }
+            if let Some(x) = self.daily.get_mut(&old.day) {
+                x.sub(&old.tokens);
+            }
+            if let Some(x) = self.daily_agent.get_mut(&old.day).and_then(|m| m.get_mut(&old.agent)) {
+                x.sub(&old.tokens);
+            }
+            if let Some(x) = self.daily_model.get_mut(&old.day).and_then(|mm| mm.get_mut(&old.model)) {
+                x.sub(&old.tokens);
+            }
+            if let Some(x) = self.per_minute.get_mut(&old.agent).and_then(|m| m.get_mut(&old.minute)) {
+                *x = x.saturating_sub(old.tokens.total());
+            }
+        }
+        self.daily.entry(day).or_default().add(&t);
+        self.daily_agent.entry(day).or_default().entry(agent.to_string()).or_default().add(&t);
+        self.daily_model.entry(day).or_default().entry(model.to_string()).or_default().add(&t);
+        self.model_agent.entry(model.to_string()).or_insert_with(|| agent.to_string());
+        self.daily_sessions.entry(day).or_default().entry(agent.to_string()).or_default().insert(sid.to_string());
+        *self.per_minute.entry(agent.to_string()).or_default().entry(minute).or_default() += t.total();
+        self.msgs.insert(id.to_string(), Counted { agent: agent.to_string(), day, model: model.to_string(), tokens: t, minute });
+    }
 }
 
 impl UsageSink for Global {
     fn report(&mut self, sid: &str, id: &str, ts: Option<DateTime<Local>>, model: &str, t: Tokens) {
-        let Some(ts) = ts else { return };
-        let day = ts.date_naive();
-        let minute = ts.timestamp().div_euclid(60);
-        if let Some((d, m, old, min)) = self.msgs.get(id).cloned() {
-            if old == t {
-                return; // mesma resposta já contada (ex.: sessão retomada copia o histórico)
-            }
-            if let Some(x) = self.daily.get_mut(&d) {
-                x.sub(&old);
-            }
-            if let Some(x) = self.daily_model.get_mut(&d).and_then(|mm| mm.get_mut(&m)) {
-                x.sub(&old);
-            }
-            if let Some(x) = self.per_minute.get_mut(&min) {
-                *x = x.saturating_sub(old.total());
-            }
-        }
-        self.daily.entry(day).or_default().add(&t);
-        self.daily_model.entry(day).or_default().entry(model.to_string()).or_default().add(&t);
-        self.daily_sessions.entry(day).or_default().insert(sid.to_string());
-        *self.per_minute.entry(minute).or_default() += t.total();
-        self.msgs.insert(id.to_string(), (day, model.to_string(), t, minute));
+        self.add(CLAUDE, sid, id, ts, model, t);
     }
 }
 
@@ -208,6 +236,8 @@ pub struct Collector {
     bg_poke: Option<Sender<()>>,
     notices: Arc<Mutex<Vec<String>>>,
     repos_cache: Option<(Instant, Vec<String>)>,
+    /// Sessões do Antigravity CLI (`~/.gemini/antigravity-cli`).
+    agy: Antigravity,
 }
 
 fn ms_to_local(v: Option<&Value>) -> Option<DateTime<Local>> {
@@ -383,6 +413,7 @@ impl Collector {
             bg_poke: None,
             notices: Arc::new(Mutex::new(Vec::new())),
             repos_cache: None,
+            agy: Antigravity::new(&home),
         })
     }
 
@@ -439,6 +470,10 @@ impl Collector {
                 let msg = self.kill_session(&session_id);
                 self.notify(msg);
             }
+            Action::KillAgent { session_id } => {
+                let msg = self.kill_agent(&session_id);
+                self.notify(msg);
+            }
             Action::Launch(spec) if !spec.background => {
                 let title = spec.name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "claude".into());
                 let msg = match actions::open_terminal(&spec.cwd, &title, &actions::launch_args(&spec)) {
@@ -458,6 +493,13 @@ impl Collector {
                 let msg = match actions::open_terminal(&cwd, &name, &["attach".into(), id]) {
                     Ok(()) => tr!("abrindo {name} numa aba nova", "opening {name} in a new tab"),
                     Err(e) => tr!("falha ao abrir: {e}", "open failed: {e}"),
+                };
+                self.notify(msg);
+            }
+            Action::OpenAgent { program, args, cwd, title } => {
+                let msg = match actions::open_program_terminal(&program, &cwd, &title, &args) {
+                    Ok(()) => tr!("{title} aberto numa aba nova em {cwd}", "{title} opened in a new tab at {cwd}"),
+                    Err(e) => tr!("falha ao abrir {title}: {e}", "failed to open {title}: {e}"),
                 };
                 self.notify(msg);
             }
@@ -564,28 +606,47 @@ impl Collector {
         if !is_session_alive(&self.sys, &m) {
             return tr!("{} já não está rodando", "{} is no longer running", m.name);
         }
+        self.kill_process(m.pid, &m.name)
+    }
+
+    /// `x` numa sessão de outro agente aberta em qualquer terminal.
+    fn kill_agent(&mut self, sid: &str) -> String {
+        let Some(pid) = self.agy.owner(sid) else {
+            return t("sessão sem processo conhecido (já fechou?)", "session has no known process (already closed?)").into();
+        };
+        // Confere de novo: o PID ainda é um `agy` (não foi reaproveitado).
+        let is_agy = self
+            .sys
+            .process(Pid::from_u32(pid))
+            .is_some_and(|p| p.name().to_string_lossy().to_lowercase().starts_with("agy"));
+        if !is_agy {
+            return tr!("o processo {pid} não é mais o agy da sessão; nada foi encerrado", "process {pid} is no longer the session's agy; nothing was ended");
+        }
+        self.kill_process(pid, &format!("{} {}", antigravity::AGENT, &sid[..sid.len().min(8)]))
+    }
+
+    /// Encerra `pid` e os filhos e limpa o terminal que ficou na aba.
+    fn kill_process(&mut self, pid: u32, name: &str) -> String {
         let children = children_map(&self.sys);
         // Não derrubar o próprio dashboard (se foi aberto de dentro desta sessão).
         let me = Pid::from_u32(std::process::id());
         let mut cur = self.sys.process(me).and_then(|p| p.parent());
         while let Some(pp) = cur {
-            if pp.as_u32() == m.pid {
-                return tr!("o agent-dash está rodando dentro de {}: encerre-a pelo próprio terminal", "agent-dash is running inside {}: end it from its own terminal", m.name);
+            if pp.as_u32() == pid {
+                return tr!("o agent-dash está rodando dentro de {name}: encerre-a pelo próprio terminal", "agent-dash is running inside {name}: end it from its own terminal");
             }
             cur = self.sys.process(pp).and_then(|p| p.parent());
         }
-        // O shell de onde o claude foi aberto continua na aba; ele herda o terminal
-        // no estado em que o Claude deixou (mouse capturado etc.) e precisa de limpeza.
-        let shell = self.sys.process(Pid::from_u32(m.pid)).and_then(|p| p.parent()).filter(|pp| self.sys.process(*pp).is_some());
-        let n = kill_tree(&self.sys, &children, Pid::from_u32(m.pid));
+        // O shell de onde o agente foi aberto continua na aba; ele herda o terminal
+        // no estado em que o agente deixou (mouse capturado etc.) e precisa de limpeza.
+        let shell = self.sys.process(Pid::from_u32(pid)).and_then(|p| p.parent()).filter(|pp| self.sys.process(*pp).is_some());
+        let n = kill_tree(&self.sys, &children, Pid::from_u32(pid));
         if let Some(pp) = shell {
             actions::spawn_console_reset(pp.as_u32());
         }
         tr!(
-            "sessão {} encerrada (pid {}, {n} processos). Para retomar: `a` mostra as encerradas, `o` reabre",
-            "session {} ended (pid {}, {n} processes). To resume: `a` shows the ended ones, `o` reopens",
-            m.name,
-            m.pid
+            "sessão {name} encerrada (pid {pid}, {n} processos). Para retomar: `a` mostra as encerradas, `o` reabre",
+            "session {name} ended (pid {pid}, {n} processes). To resume: `a` shows the ended ones, `o` reopens"
         )
     }
 
@@ -697,9 +758,16 @@ impl Collector {
             .map(|d| self.files.get(&d.path).map_or(0, |s| s.offset.min(d.len)))
             .sum();
 
-        self.build(t0, &disc, &meta_by_sid, &live, history_done, history_total)
+        let agy = self.agy.scan(&mut self.sys);
+        for (conv, turns) in self.agy.refresh_usage() {
+            for t in turns {
+                self.global.add(antigravity::AGENT, &conv, &format!("agy:{conv}:{}", t.idx), t.ts, &t.model, t.tokens);
+            }
+        }
+        self.build(t0, &disc, &meta_by_sid, &live, history_done, history_total, agy)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build(
         &mut self,
         _t0: Instant,
@@ -708,6 +776,7 @@ impl Collector {
         live: &HashSet<String>,
         history_done: u64,
         history_total: u64,
+        agy: Vec<AgyConv>,
     ) -> Snapshot {
         let now = SystemTime::now();
         let is_recent = |d: &Disc| now.duration_since(d.mtime).map_or(true, |x| x < RECENT);
@@ -820,6 +889,7 @@ impl Collector {
                     .filter(|k| !k.is_empty())
                     .or_else(|| bg.map(|_| "background".to_string()))
                     .unwrap_or_default(),
+                agent: None,
                 bg_id: bg.map(|b| b.id.clone()),
                 pending: bg.and_then(|b| b.needs.clone()).filter(|_| bg.is_some_and(|b| b.pending())),
                 version: meta.map(|m| m.version.clone()).unwrap_or_default(),
@@ -897,6 +967,55 @@ impl Collector {
                 .count();
         }
 
+        // Sessões do Antigravity: mesma lista, mesmas regras (vivas sempre,
+        // encerradas das últimas 24h com `a`). Tokens lidos do `.db` da conversa.
+        for c in agy {
+            let (cpu, mem, procs) = match c.pid {
+                Some(pid) => {
+                    let p = self.sys.process(Pid::from_u32(pid));
+                    (p.map_or(0.0, |p| p.cpu_usage()), p.map_or(0, |p| p.memory()), proc_tree(&self.sys, &children, Pid::from_u32(pid)))
+                }
+                None => (0.0, 0, Vec::new()),
+            };
+            let started = c.pid.and_then(|pid| self.sys.process(Pid::from_u32(pid))).and_then(|p| Local.timestamp_opt(p.start_time() as i64, 0).single());
+            sessions.push(SessionInfo {
+                pid: c.pid,
+                name: c.title.clone().unwrap_or_else(|| {
+                    if c.id.starts_with(antigravity::NEW_PREFIX) {
+                        t("antigravity (nova)", "antigravity (new)").to_string()
+                    } else {
+                        format!("antigravity {}", &c.id[..c.id.len().min(8)])
+                    }
+                }),
+                cwd: c.cwd.clone().unwrap_or_default(),
+                status: match (c.pid, c.busy) {
+                    (None, _) => "encerrada".into(),
+                    (Some(_), true) => "busy".into(),
+                    (Some(_), false) => "idle".into(),
+                },
+                kind: "antigravity".into(),
+                agent: Some(antigravity::AGENT.into()),
+                bg_id: None,
+                pending: None,
+                version: String::new(),
+                started_at: started.or(c.created),
+                alive: c.pid.is_some(),
+                title: c.title.clone(),
+                last_prompt: c.prompts.last().map(|e| e.text.clone()),
+                usage: agy_usage(self.agy.turns(&c.id).unwrap_or_default(), c.created, c.updated),
+                agents_usage: Tokens::default(),
+                events: c.prompts,
+                transcript: None,
+                cpu,
+                mem,
+                procs,
+                agents_total: 0,
+                agents_running: 0,
+                tasks_running: 0,
+                session_id: c.id,
+            });
+        }
+
         let last_activity = |s: &SessionInfo| s.usage.last_ts.or(s.started_at);
         sessions.sort_by(|a, b| b.alive.cmp(&a.alive).then_with(|| last_activity(b).cmp(&last_activity(a))));
         agents.sort_by(|a, b| b.running.cmp(&a.running).then_with(|| b.last_activity.cmp(&a.last_activity)));
@@ -907,8 +1026,16 @@ impl Collector {
         });
 
         let now_min = Local::now().timestamp().div_euclid(60);
-        self.global.per_minute.retain(|m, _| *m > now_min - 180);
-        let per_minute = (0..60).map(|i| *self.global.per_minute.get(&(now_min - 59 + i)).unwrap_or(&0)).collect();
+        let mut per_minute = vec![0u64; 60];
+        let mut per_minute_by_agent = BTreeMap::new();
+        for (agent, m) in self.global.per_minute.iter_mut() {
+            m.retain(|min, _| *min > now_min - 180);
+            let v: Vec<u64> = (0..60).map(|i| *m.get(&(now_min - 59 + i)).unwrap_or(&0)).collect();
+            for (acc, x) in per_minute.iter_mut().zip(&v) {
+                *acc += x;
+            }
+            per_minute_by_agent.insert(agent.clone(), v);
+        }
 
         let repos = self.repos(&sessions);
         let notices = std::mem::take(&mut *self.notices.lock().unwrap());
@@ -919,14 +1046,49 @@ impl Collector {
             agents,
             tasks,
             daily: self.global.daily.clone(),
+            daily_by_agent: self.global.daily_agent.clone(),
             daily_by_model: self.global.daily_model.clone(),
-            daily_sessions: self.global.daily_sessions.iter().map(|(d, s)| (*d, s.len())).collect(),
+            model_agent: self.global.model_agent.clone(),
+            daily_sessions: self
+                .global
+                .daily_sessions
+                .iter()
+                .map(|(d, by)| (*d, by.iter().map(|(a, s)| (a.clone(), s.len())).collect()))
+                .collect(),
             per_minute,
+            per_minute_by_agent,
             history_done,
             history_total,
             loaded: true,
         }
     }
+}
+
+/// Uso de uma conversa do Antigravity no mesmo formato das sessões do Claude.
+fn agy_usage(turns: &[antigravity::AgyTurn], created: Option<DateTime<Local>>, updated: Option<DateTime<Local>>) -> Usage {
+    let mut u = Usage { first_ts: created, last_ts: updated, ..Default::default() };
+    let now_min = Local::now().timestamp().div_euclid(60);
+    for t in turns {
+        u.tokens.add(&t.tokens);
+        u.by_model.entry(t.model.clone()).or_default().add(&t.tokens);
+        u.turns += 1;
+        if let Some(ts) = t.ts {
+            let min = ts.timestamp().div_euclid(60);
+            if min > now_min - 60 {
+                *u.per_minute.entry(min).or_default() += t.tokens.total();
+            }
+            u.first_ts = Some(u.first_ts.map_or(ts, |f| f.min(ts)));
+            u.last_ts = Some(u.last_ts.map_or(ts, |l| l.max(ts)));
+        }
+    }
+    // A resposta mais recente do modelo principal dá o contexto atual e o
+    // modelo em uso (o modelo sem nome é o auxiliar, que gera títulos).
+    let main = turns.iter().filter(|t| !t.model.starts_with("antigravity #")).max_by_key(|t| (t.ts, t.idx));
+    if let Some(last) = main.or_else(|| turns.iter().max_by_key(|t| (t.ts, t.idx))) {
+        u.last_turn = last.tokens;
+        u.model = Some(last.model.clone());
+    }
+    u
 }
 
 pub fn run(tx: Sender<Snapshot>, rx: Receiver<Ctl>) {

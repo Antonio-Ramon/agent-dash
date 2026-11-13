@@ -34,6 +34,12 @@ pub enum Action {
     Resume { session_id: String, cwd: String, name: String },
     /// `claude attach <id>` numa aba nova (sessão em background).
     Attach { id: String, cwd: String, name: String },
+    /// Encerra o processo de uma sessão de outro agente (ex.: `agy`) aberta
+    /// em qualquer terminal.
+    KillAgent { session_id: String },
+    /// Outro agente (Antigravity, Codex…) numa aba nova. `program` é o caminho já
+    /// resolvido no PATH: o `wt` não acha sozinho os atalhos `.cmd` do npm.
+    OpenAgent { program: String, args: Vec<String>, cwd: String, title: String },
 }
 
 /// Desliga os modos que o Claude Code liga no terminal e que ficam ligados se
@@ -127,6 +133,11 @@ pub fn claude_cli(args: &[String], cwd: Option<&str>) -> Result<String, String> 
 /// Abre `claude <args>` numa aba nova do Windows Terminal (ou numa janela nova
 /// do console, se o `wt` não existir), com `cwd` como diretório.
 pub fn open_terminal(cwd: &str, title: &str, args: &[String]) -> Result<(), String> {
+    open_program_terminal("claude", cwd, title, args)
+}
+
+/// Como `open_terminal`, para qualquer programa (outro agente de linha de comando).
+pub fn open_program_terminal(program: &str, cwd: &str, title: &str, args: &[String]) -> Result<(), String> {
     if !Path::new(cwd).is_dir() {
         return Err(tr!("diretório não existe: {cwd}", "directory does not exist: {cwd}"));
     }
@@ -135,13 +146,13 @@ pub fn open_terminal(cwd: &str, title: &str, args: &[String]) -> Result<(), Stri
     let args: Vec<String> = args.iter().map(|a| clean(a)).collect();
     let title = clean(title);
     let mut wt = Command::new("wt");
-    wt.args(["-w", "0", "nt", "-d", cwd, "--title", &title, "claude"]).args(&args);
+    wt.args(["-w", "0", "nt", "-d", cwd, "--title", &title, program]).args(&args);
     wt.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     if wt.spawn().is_ok() {
         return Ok(());
     }
     let mut c = Command::new("cmd");
-    c.args(["/c", "start", &title, "/D", cwd, "claude"]).args(&args);
+    c.args(["/c", "start", &title, "/D", cwd, program]).args(&args);
     c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     c.spawn().map(|_| ()).map_err(|e| tr!("não consegui abrir um terminal: {e}", "could not open a terminal: {e}"))
 }
