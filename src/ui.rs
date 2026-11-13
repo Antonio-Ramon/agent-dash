@@ -2,6 +2,7 @@
 //! esquerda, painel principal com abas à direita, atalhos no rodapé.
 
 use crate::app::{App, Panel};
+use crate::i18n::{t, tr};
 use crate::model::*;
 use chrono::{DateTime, Local};
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
@@ -79,13 +80,13 @@ fn fit(s: &str, w: usize) -> String {
     }
 }
 
-fn weekday_pt(d: chrono::NaiveDate, long: bool) -> &'static str {
+fn weekday(d: chrono::NaiveDate) -> &'static str {
     use chrono::Datelike;
     let i = d.weekday().num_days_from_monday() as usize;
-    if long {
-        ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"][i]
+    if crate::i18n::en() {
+        ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][i]
     } else {
-        ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"][i]
+        ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"][i]
     }
 }
 
@@ -120,12 +121,13 @@ fn session_dot(s: &SessionInfo) -> Span<'static> {
 
 fn status_label(s: &SessionInfo) -> &str {
     match s.status.as_str() {
-        "busy" => "ocupada",
-        "idle" => "ociosa",
+        "busy" => t("ocupada", "busy"),
+        "idle" => t("ociosa", "idle"),
         "shell" => "shell",
-        "blocked" => "aguarda",
-        "pendente" => "espera",
-        "running" | "working" => "rodando",
+        "blocked" => t("aguarda", "blocked"),
+        "pendente" => t("espera", "waiting"),
+        "encerrada" => t("encerrada", "ended"),
+        "running" | "working" => t("rodando", "running"),
         other => other,
     }
 }
@@ -140,14 +142,15 @@ fn task_style(t: &TaskInfo) -> (&'static str, Style) {
     }
 }
 
-fn task_status_text(t: &TaskInfo) -> String {
-    match &t.status {
-        TaskStatus::Running => "rodando".into(),
-        TaskStatus::Orphan => "órfã (sessão encerrada)".into(),
+fn task_status_text(task: &TaskInfo) -> String {
+    match &task.status {
+        TaskStatus::Running => t("rodando", "running").into(),
+        TaskStatus::Orphan => t("órfã (sessão encerrada)", "orphan (session ended)").into(),
         TaskStatus::Done(s) => match s.as_str() {
-            "completed" => "concluída".into(),
-            "killed" | "stopped" => "interrompida".into(),
-            "failed" => "falhou".into(),
+            "completed" => t("concluída", "completed").into(),
+            "killed" | "stopped" => t("interrompida", "interrupted").into(),
+            "failed" => t("falhou", "failed").into(),
+            "expirado" => t("expirado", "expired").into(),
             other => other.into(),
         },
     }
@@ -226,9 +229,9 @@ fn draw_confirm(f: &mut Frame, app: &App) {
     lines.push(Line::from(vec![
         Span::raw(" "),
         Span::styled(" y ", Style::new().fg(Color::Black).bg(Color::Red).bold()),
-        Span::raw(" confirmar    "),
+        Span::raw(t(" confirmar    ", " confirm    ")),
         Span::styled(" n ", Style::new().fg(Color::Black).bg(DIM).bold()),
-        Span::raw(" cancelar"),
+        Span::raw(t(" cancelar", " cancel")),
     ]));
     let p = Paragraph::new(lines).wrap(Wrap { trim: false });
     let wrapped: usize = c.body.iter().map(|b| b.chars().count() / (w as usize - 4) + 1).sum();
@@ -253,7 +256,7 @@ fn draw_launcher(f: &mut Frame, app: &App) {
     let block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(Style::new().fg(FOCUS))
-        .title(Span::styled(" Nova instância do Claude Code ", Style::new().fg(FOCUS).bold()))
+        .title(Span::styled(t(" Nova instância do Claude Code ", " New Claude Code instance "), Style::new().fg(FOCUS).bold()))
         .title_alignment(Alignment::Center);
     let inner = block.inner(r);
     f.render_widget(block, r);
@@ -273,20 +276,22 @@ fn draw_launcher(f: &mut Frame, app: &App) {
         }
         v
     };
-    let mut model = vec![label(1, "Modelo")];
-    model.extend(choice(&crate::actions::MODELS, form.model));
-    let mut mode = vec![label(2, "Modo")];
-    mode.extend(choice(&["aqui no painel", "aba nova do terminal", "background"], form.mode));
+    let mut models = crate::actions::MODELS;
+    models[0] = t("padrão", "default");
+    let mut model = vec![label(1, t("Modelo", "Model"))];
+    model.extend(choice(&models, form.model));
+    let mut mode = vec![label(2, t("Modo", "Mode"))];
+    mode.extend(choice(&[t("aqui no painel", "here in the panel"), t("aba nova do terminal", "new terminal tab"), "background"], form.mode));
     let lines = vec![
-        Line::from(vec![label(0, "Repositório"), Span::raw(" "), Span::raw(form.repo.clone()), cursor(0)]),
+        Line::from(vec![label(0, t("Repositório", "Repository")), Span::raw(" "), Span::raw(form.repo.clone()), cursor(0)]),
         Line::from(model),
         Line::from(mode),
         Line::from(vec![
-            label(3, "Nome"),
+            label(3, t("Nome", "Name")),
             Span::raw(" "),
             Span::raw(form.name.clone()),
             cursor(3),
-            Span::styled(if form.name.is_empty() && form.field != 3 { "(opcional)" } else { "" }, Style::new().fg(DIM).italic()),
+            Span::styled(if form.name.is_empty() && form.field != 3 { t("(opcional)", "(optional)") } else { "" }, Style::new().fg(DIM).italic()),
         ]),
         Line::from(vec![
             label(4, "Prompt"),
@@ -294,7 +299,7 @@ fn draw_launcher(f: &mut Frame, app: &App) {
             Span::raw(form.prompt.clone()),
             cursor(4),
             Span::styled(
-                if form.prompt.is_empty() && form.field != 4 { "(opcional: primeira mensagem)" } else { "" },
+                if form.prompt.is_empty() && form.field != 4 { t("(opcional: primeira mensagem)", "(optional: first message)") } else { "" },
                 Style::new().fg(DIM).italic(),
             ),
         ]),
@@ -315,15 +320,21 @@ fn draw_launcher(f: &mut Frame, app: &App) {
             let live = app.snap.sessions.iter().filter(|s| s.alive && s.cwd.eq_ignore_ascii_case(r)).count();
             let mut spans = vec![Span::styled(format!(" {} ", if i == sel { "›" } else { " " }), Style::new().fg(ACCENT)), Span::styled(r.to_string(), st)];
             if live > 0 {
-                spans.push(Span::styled(format!("  ● {live} aberta{}", if live > 1 { "s" } else { "" }), Style::new().fg(Color::Green)));
+                let s = if live > 1 { "s" } else { "" };
+                spans.push(Span::styled(tr!("  ● {live} aberta{s}", "  ● {live} open"), Style::new().fg(Color::Green)));
             }
             ListItem::new(Line::from(spans))
         })
         .collect();
     let title = if sug.is_empty() {
-        " Nenhum repositório conhecido combina; Enter usa o caminho digitado se existir ".to_string()
+        t(
+            " Nenhum repositório conhecido combina; Enter usa o caminho digitado se existir ",
+            " No known repository matches; Enter uses the typed path if it exists ",
+        )
+        .to_string()
     } else {
-        format!(" Repositórios ({}) · ↑↓ escolhe ", sug.len())
+        let n = sug.len();
+        tr!(" Repositórios ({n}) · ↑↓ escolhe ", " Repositories ({n}) · ↑↓ to pick ")
     };
     f.render_widget(
         List::new(items).block(Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(DIM)).title(title)),
@@ -342,7 +353,7 @@ fn draw_launcher(f: &mut Frame, app: &App) {
         match &form.error {
             Some(e) => Line::from(Span::styled(format!(" {e}"), Style::new().fg(Color::Red))),
             None => Line::from(vec![
-                Span::styled(" em ", Style::new().fg(DIM)),
+                Span::styled(t(" em ", " in "), Style::new().fg(DIM)),
                 Span::styled(form.chosen(&app.snap.repos).unwrap_or_else(|| "?".into()), Style::new().fg(Color::White)),
             ]),
         },
@@ -365,29 +376,30 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(" agent-dash ", Style::new().fg(Color::Black).bg(FOCUS).bold()),
         Span::raw(" "),
         Span::styled(format!("{alive}"), Style::new().fg(Color::Green).bold()),
-        Span::raw(" sessões"),
-        Span::styled(format!(" ({busy} trabalhando)"), Style::new().fg(Color::Yellow)),
+        Span::raw(t(" sessões", " sessions")),
+        Span::styled(tr!(" ({busy} trabalhando)", " ({busy} working)"), Style::new().fg(Color::Yellow)),
         sep.clone(),
         Span::styled(format!("{agents}"), Style::new().fg(Color::Yellow).bold()),
-        Span::raw(" agentes"),
+        Span::raw(t(" agentes", " agents")),
         sep.clone(),
         Span::styled(format!("{shells}"), Style::new().fg(ACCENT).bold()),
         Span::raw(" shells "),
         Span::styled(format!("{monitors}"), Style::new().fg(ACCENT).bold()),
         Span::raw(" monitors"),
         sep.clone(),
-        Span::raw("hoje "),
+        Span::raw(t("hoje ", "today ")),
         Span::styled(fmt_tok(today_tok), Style::new().fg(Color::Magenta).bold()),
         Span::raw(" tok "),
         Span::styled(spark_text(&s.per_minute[s.per_minute.len().saturating_sub(30)..]), Style::new().fg(Color::Magenta)),
     ];
     if !s.loaded {
         spans.push(sep.clone());
-        spans.push(Span::styled("carregando…", Style::new().fg(Color::Yellow)));
+        spans.push(Span::styled(t("carregando…", "loading…"), Style::new().fg(Color::Yellow)));
     } else if s.history_total > 0 && s.history_done < s.history_total {
         spans.push(sep.clone());
+        let pct = s.history_done as f64 * 100.0 / s.history_total as f64;
         spans.push(Span::styled(
-            format!("lendo histórico {:.0}%", s.history_done as f64 * 100.0 / s.history_total as f64),
+            tr!("lendo histórico {pct:.0}%", "reading history {pct:.0}%"),
             Style::new().fg(Color::Yellow),
         ));
     }
@@ -401,42 +413,51 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     }
     if app.chat_focus {
         let mut spans = vec![Span::styled(" CHAT ", Style::new().fg(Color::Black).bg(FOCUS).bold()), Span::raw(" ")];
-        spans.extend(key_line(&[("F12", "volta ao painel"), ("Shift+PgUp/PgDn", "rolar"), ("arrastar", "copiar"), ("Ctrl+Enter", "nova linha")]).spans);
-        spans.push(Span::styled("o teclado está indo para o Claude", Style::new().fg(DIM).italic()));
+        spans.extend(
+            key_line(&[
+                ("F12", t("volta ao painel", "back to panel")),
+                ("Shift+PgUp/PgDn", t("rolar", "scroll")),
+                (t("arrastar", "drag"), t("copiar", "copy")),
+                ("Ctrl+Enter", t("nova linha", "new line")),
+            ])
+            .spans,
+        );
+        spans.push(Span::styled(t("o teclado está indo para o Claude", "keys go to Claude"), Style::new().fg(DIM).italic()));
         f.render_widget(Line::from(spans), area);
         return;
     }
     if app.launcher.is_some() {
         let keys: &[(&str, &str)] = &[
-            ("Tab ↑↓", "campo"),
-            ("↑↓", "repositório"),
-            ("← →", "modelo/modo"),
-            ("Ctrl+U", "limpar campo"),
-            ("Enter", "iniciar"),
-            ("Esc", "cancelar"),
+            ("Tab ↑↓", t("campo", "field")),
+            ("↑↓", t("repositório", "repository")),
+            ("← →", t("modelo/modo", "model/mode")),
+            ("Ctrl+U", t("limpar campo", "clear field")),
+            ("Enter", t("iniciar", "start")),
+            ("Esc", t("cancelar", "cancel")),
         ];
         f.render_widget(key_line(keys), area);
         return;
     }
     if app.confirm.is_some() {
-        f.render_widget(key_line(&[("y Enter", "confirmar"), ("n Esc", "cancelar")]), area);
+        f.render_widget(key_line(&[("y Enter", t("confirmar", "confirm")), ("n Esc", t("cancelar", "cancel"))]), area);
         return;
     }
+    let (new, clean, folder, copy) = (t("nova", "new"), t("limpar", "clear"), t("pasta", "folder"), t("copiar", "copy"));
     let ctx: &[(&str, &str)] = match app.focus {
-        Panel::Sessions => &[("Enter", "chat"), ("n", "nova"), ("o", "aba nova"), ("x", "encerrar"), ("d", "limpar"), ("e", "pasta"), ("c", "copiar")],
-        Panel::Agents => &[("n", "nova"), ("d/D", "limpar"), ("e", "pasta"), ("c", "copiar id")],
-        Panel::Tasks => &[("x", "parar"), ("d/D", "limpar"), ("o", "saída"), ("c", "caminho"), ("J/K", "rolar")],
-        Panel::Usage => &[("n", "nova"), ("c", "copiar")],
+        Panel::Sessions => &[("Enter", "chat"), ("n", new), ("o", t("aba nova", "new tab")), ("x", t("encerrar", "end")), ("d", clean), ("e", folder), ("c", copy)],
+        Panel::Agents => &[("n", new), ("d/D", clean), ("e", folder), ("c", t("copiar id", "copy id"))],
+        Panel::Tasks => &[("x", t("parar", "stop")), ("d/D", clean), ("o", t("saída", "output")), ("c", t("caminho", "path")), ("J/K", t("rolar", "scroll"))],
+        Panel::Usage => &[("n", new), ("c", copy)],
     };
     let common: &[(&str, &str)] = &[
-        ("1-4", "painel"),
-        ("↑↓", "mover"),
-        ("[ ]", "aba"),
+        ("1-4", t("painel", "panel")),
+        ("↑↓", t("mover", "move")),
+        ("[ ]", t("aba", "tab")),
         ("z", "zoom"),
-        ("a", if app.show_all { "só ativos" } else { "tudo" }),
-        ("f", if app.only_selected { "todas" } else { "filtrar" }),
+        ("a", if app.show_all { t("só ativos", "active only") } else { t("tudo", "all") }),
+        ("f", if app.only_selected { t("todas", "all sessions") } else { t("filtrar", "filter") }),
     ];
-    let tail: &[(&str, &str)] = &[("?", "ajuda"), ("q", "sair")];
+    let tail: &[(&str, &str)] = &[("?", t("ajuda", "help")), ("q", t("sair", "quit"))];
     let mut spans = vec![Span::raw(" ")];
     for (k, d) in common.iter().chain(ctx.iter()).chain(tail.iter()) {
         spans.push(Span::styled(*k, Style::new().fg(ACCENT).bold()));
@@ -532,10 +553,13 @@ fn draw_sessions(f: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
     let n = items.len();
-    let title = if app.show_all { format!("[1] Sessões ({alive} vivas, {n} em 24h)") } else { format!("[1] Sessões ({alive})") };
+    let title = match app.show_all {
+        true => tr!("[1] Sessões ({alive} vivas, {n} em 24h)", "[1] Sessions ({alive} alive, {n} in 24h)"),
+        false => tr!("[1] Sessões ({alive})", "[1] Sessions ({alive})"),
+    };
     draw_list(f, area, app, Panel::Sessions, items, title);
     if n == 0 {
-        empty_hint(f, area, "nenhuma sessão do Claude Code rodando");
+        empty_hint(f, area, t("nenhuma sessão do Claude Code rodando", "no Claude Code session running"));
     }
 }
 
@@ -562,11 +586,11 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
     let n = items.len();
-    let scope = if app.only_selected { " · sessão" } else { "" };
-    let title = format!("[2] Agentes ({running} rodando{scope})");
+    let scope = if app.only_selected { t(" · sessão", " · session") } else { "" };
+    let title = tr!("[2] Agentes ({running} rodando{scope})", "[2] Agents ({running} running{scope})");
     draw_list(f, area, app, Panel::Agents, items, title);
     if n == 0 {
-        empty_hint(f, area, "nenhum subagente ativo");
+        empty_hint(f, area, t("nenhum subagente ativo", "no active subagent"));
     }
 }
 
@@ -595,18 +619,18 @@ fn draw_tasks(f: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
     let n = items.len();
-    let scope = if app.only_selected { " · sessão" } else { "" };
-    let title = format!("[3] Shells/Monitors/Tasks ({running} rodando{scope})");
+    let scope = if app.only_selected { t(" · sessão", " · session") } else { "" };
+    let title = tr!("[3] Shells/Monitors/Tasks ({running} rodando{scope})", "[3] Shells/Monitors/Tasks ({running} running{scope})");
     draw_list(f, area, app, Panel::Tasks, items, title);
     if n == 0 {
-        empty_hint(f, area, "nada em background");
+        empty_hint(f, area, t("nada em background", "nothing in background"));
     }
 }
 
 fn draw_days(f: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.focus == Panel::Usage;
     let days = app.days(); // mais recente primeiro
-    let block = panel_block("[4] Uso por dia".to_string(), focused);
+    let block = panel_block(t("[4] Uso por dia", "[4] Daily usage").to_string(), focused);
     let inner = block.inner(area);
     let bar_w: u16 = 6;
     let n = ((inner.width + 1) / (bar_w + 1)).max(1) as usize;
@@ -678,17 +702,18 @@ fn draw_chat(f: &mut Frame, area: Rect, app: &mut App, key: Option<String>) {
             let u = &s.usage;
             let mins = minutes_series(u);
             let last5: u64 = mins[mins.len() - 5..].iter().sum::<u64>() / 5;
+            let (out, cache) = (fmt_tok(u.tokens.output), fmt_tok(u.tokens.cache_read));
             let mut v = vec![
-                lab(" contexto "),
+                lab(t(" contexto ", " context ")),
                 Span::styled(fmt_tok(u.last_turn.context()), Style::new().fg(Color::Yellow).bold()),
                 sep.clone(),
-                lab("sessão "),
+                lab(t("sessão ", "session ")),
                 Span::styled(fmt_tok(u.tokens.total()), Style::new().fg(Color::Magenta).bold()),
                 lab(" tok"),
-                lab(&format!("  (saída {} · cache lido {})", fmt_tok(u.tokens.output), fmt_tok(u.tokens.cache_read))),
+                lab(&tr!("  (saída {out} · cache lido {cache})", "  (output {out} · cache read {cache})")),
             ];
             if s.agents_total > 0 {
-                v.push(lab(" + subagentes "));
+                v.push(lab(t(" + subagentes ", " + subagents ")));
                 v.push(Span::styled(fmt_tok(s.agents_usage.total()), Style::new().fg(Color::Magenta)));
             }
             v.extend([
@@ -697,23 +722,24 @@ fn draw_chat(f: &mut Frame, area: Rect, app: &mut App, key: Option<String>) {
                 lab(" "),
                 Span::styled(spark_text(&mins[mins.len() - 20..]), Style::new().fg(ACCENT)),
                 sep.clone(),
-                lab(&format!("{} respostas", u.turns)),
+                lab(&tr!("{} respostas", "{} replies", u.turns)),
                 sep.clone(),
                 lab(u.model.as_deref().unwrap_or("-")),
             ]);
             Line::from(v)
         }
-        None => Line::from(lab(" contexto e tokens aparecem depois da primeira resposta")),
+        None => Line::from(lab(t(" contexto e tokens aparecem depois da primeira resposta", " context and tokens show up after the first reply"))),
     };
     f.render_widget(line.style(Style::new().bg(Color::Rgb(22, 26, 36))), meter);
     let Some(i) = idx else {
+        let key = |k: &'static str, d: &'static str| Line::from(vec![Span::styled(k, Style::new().fg(ACCENT).bold()), Span::raw(d)]);
         let lines = vec![
             Line::raw(""),
-            Line::from(Span::styled("  Esta sessão não tem chat aberto aqui dentro.", Style::new().fg(DIM))),
+            Line::from(Span::styled(t("  Esta sessão não tem chat aberto aqui dentro.", "  This session has no chat open in here."), Style::new().fg(DIM))),
             Line::raw(""),
-            Line::from(vec![Span::styled("  Enter ", Style::new().fg(ACCENT).bold()), Span::raw("abre o chat aqui (retoma uma sessão encerrada ou em background)")]),
-            Line::from(vec![Span::styled("  n     ", Style::new().fg(ACCENT).bold()), Span::raw("nova instância dentro do painel")]),
-            Line::from(vec![Span::styled("  F12   ", Style::new().fg(ACCENT).bold()), Span::raw("devolve o teclado ao painel quando estiver no chat")]),
+            key("  Enter ", t("abre o chat aqui (retoma uma sessão encerrada ou em background)", "opens the chat here (resumes an ended or background session)")),
+            key("  n     ", t("nova instância dentro do painel", "new instance inside the panel")),
+            key("  F12   ", t("devolve o teclado ao painel quando estiver no chat", "gives the keyboard back to the panel while in the chat")),
         ];
         f.render_widget(Paragraph::new(lines), inner);
         return;
@@ -747,7 +773,7 @@ fn draw_chat(f: &mut Frame, area: Rect, app: &mut App, key: Option<String>) {
         }
     }
     if shown > 0 {
-        let tag = format!(" ↑ {shown} linhas acima do fim ");
+        let tag = tr!(" ↑ {shown} linhas acima do fim ", " ↑ {shown} lines above the end ");
         let w = tag.chars().count() as u16;
         let r = Rect { x: area.right().saturating_sub(w + 2), y: area.bottom() - 1, width: w, height: 1 };
         f.render_widget(Span::styled(tag, Style::new().fg(Color::Black).bg(Color::Yellow)), r);
@@ -774,19 +800,19 @@ fn draw_main(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn token_rows(u: &Usage, extra: Option<(&str, Tokens)>) -> Vec<Row<'static>> {
-    let t = &u.tokens;
+    let tk = &u.tokens;
     let mut rows = vec![
-        Row::new(vec![Cell::from("Entrada"), Cell::from(fmt_tok(t.input))]),
-        Row::new(vec![Cell::from("Cache escrita"), Cell::from(fmt_tok(t.cache_write))]),
-        Row::new(vec![Cell::from("Cache leitura"), Cell::from(fmt_tok(t.cache_read))]),
-        Row::new(vec![Cell::from("Saída"), Cell::from(fmt_tok(t.output))]),
-        Row::new(vec![Cell::from("Total").bold(), Cell::from(fmt_tok(t.total())).fg(Color::Magenta).bold()]),
+        Row::new(vec![Cell::from(t("Entrada", "Input")), Cell::from(fmt_tok(tk.input))]),
+        Row::new(vec![Cell::from(t("Cache escrita", "Cache write")), Cell::from(fmt_tok(tk.cache_write))]),
+        Row::new(vec![Cell::from(t("Cache leitura", "Cache read")), Cell::from(fmt_tok(tk.cache_read))]),
+        Row::new(vec![Cell::from(t("Saída", "Output")), Cell::from(fmt_tok(tk.output))]),
+        Row::new(vec![Cell::from("Total").bold(), Cell::from(fmt_tok(tk.total())).fg(Color::Magenta).bold()]),
     ];
     if let Some((label, x)) = extra {
         rows.push(Row::new(vec![Cell::from(label.to_string()), Cell::from(fmt_tok(x.total())).fg(Color::Magenta)]));
     }
-    rows.push(Row::new(vec![Cell::from("Contexto atual"), Cell::from(fmt_tok(u.last_turn.context())).fg(Color::Yellow)]));
-    rows.push(Row::new(vec![Cell::from("Respostas"), Cell::from(u.turns.to_string())]));
+    rows.push(Row::new(vec![Cell::from(t("Contexto atual", "Current context")), Cell::from(fmt_tok(u.last_turn.context())).fg(Color::Yellow)]));
+    rows.push(Row::new(vec![Cell::from(t("Respostas", "Replies")), Cell::from(u.turns.to_string())]));
     rows
 }
 
@@ -815,9 +841,9 @@ fn event_lines(events: &[Event], scroll: u16) -> Vec<Line<'static>> {
         .skip(scroll as usize)
         .map(|e| {
             let (tag, st) = match e.kind {
-                EventKind::Prompt => ("› você ", Style::new().fg(Color::Magenta).bold()),
+                EventKind::Prompt => (t("› você ", "› you  "), Style::new().fg(Color::Magenta).bold()),
                 EventKind::Tool => ("⚙ tool ", Style::new().fg(ACCENT)),
-                EventKind::Text => ("✎ texto", Style::new().fg(Color::White)),
+                EventKind::Text => (t("✎ texto", "✎ text "), Style::new().fg(Color::White)),
                 EventKind::Notice => ("■ task ", Style::new().fg(Color::Yellow)),
             };
             Line::from(vec![
@@ -833,7 +859,8 @@ fn sparkline_block(f: &mut Frame, area: Rect, u: &Usage, color: Color) {
     let data = minutes_series(u);
     let max = data.iter().copied().max().unwrap_or(0);
     let sum: u64 = data.iter().sum();
-    let title = format!(" Tokens/min · última hora (soma {} · pico {}/min) ", fmt_tok(sum), fmt_tok(max));
+    let (sum, max) = (fmt_tok(sum), fmt_tok(max));
+    let title = tr!(" Tokens/min · última hora (soma {sum} · pico {max}/min) ", " Tokens/min · last hour (sum {sum} · peak {max}/min) ");
     let w = area.width.saturating_sub(2) as usize;
     // Estica os 60 minutos para a largura disponível.
     let stretched: Vec<u64> = if w > 60 { (0..w).map(|i| data[i * 60 / w]).collect() } else { data[60 - w.min(60)..].to_vec() };
@@ -846,24 +873,24 @@ fn sparkline_block(f: &mut Frame, area: Rect, u: &Usage, color: Color) {
 
 fn draw_session_main(f: &mut Frame, area: Rect, app: &mut App) {
     let Some(s) = app.selected_session().cloned() else {
-        f.render_widget(Paragraph::new("Nenhuma sessão selecionada.").block(main_block(app, "Sessão".into())), area);
+        f.render_widget(Paragraph::new(t("Nenhuma sessão selecionada.", "No session selected.")).block(main_block(app, t("Sessão", "Session").into())), area);
         return;
     };
-    let block = main_block(app, format!("Sessão {}", s.name));
+    let block = main_block(app, tr!("Sessão {}", "Session {}", s.name));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     match app.tab {
         1 => {
             let lines = event_lines(&s.events, app.scroll);
-            let p = if lines.is_empty() { Paragraph::new("Sem atividade registrada.") } else { Paragraph::new(lines) };
+            let p = if lines.is_empty() { Paragraph::new(t("Sem atividade registrada.", "No recorded activity.")) } else { Paragraph::new(lines) };
             f.render_widget(p, inner);
         }
         2 => {
-            let header = Row::new(vec!["PID", "Processo", "CPU", "Mem", "Comando"]).style(Style::new().fg(DIM));
+            let header = Row::new(vec!["PID", t("Processo", "Process"), "CPU", "Mem", t("Comando", "Command")]).style(Style::new().fg(DIM));
             let mut rows = vec![Row::new(vec![
                 Cell::from(s.pid.map(|p| p.to_string()).unwrap_or_default()),
-                Cell::from("claude (sessão)").bold(),
+                Cell::from(t("claude (sessão)", "claude (session)")).bold(),
                 Cell::from(format!("{:.1}%", s.cpu)),
                 Cell::from(fmt_mb(s.mem)),
                 Cell::from(""),
@@ -896,8 +923,11 @@ fn draw_session_main(f: &mut Frame, area: Rect, app: &mut App) {
                 let d = session_dot(&s);
                 (d.content.to_string(), d.style)
             };
+            let (started, last) = (fmt_ago(s.started_at), fmt_ago(s.usage.last_ts));
+            let (ar, at, tr_) = (s.agents_running, s.agents_total, s.tasks_running);
+            let (cpu, mem, nproc) = (s.cpu, fmt_mb(s.mem), s.procs.len());
             let lines = vec![
-                Line::from(Span::styled(s.title.clone().unwrap_or_else(|| "(sem título)".into()), Style::new().bold())),
+                Line::from(Span::styled(s.title.clone().unwrap_or_else(|| t("(sem título)", "(untitled)").into()), Style::new().bold())),
                 Line::from(vec![
                     Span::styled(format!("{:<14}", "Status"), Style::new().fg(DIM)),
                     Span::styled(format!("{dot_txt} {}", status_label(&s)), dot_style),
@@ -906,29 +936,32 @@ fn draw_session_main(f: &mut Frame, area: Rect, app: &mut App) {
                         Style::new().fg(DIM),
                     ),
                 ]),
-                kv("Diretório", s.cwd.clone()),
-                kv("Modelo", s.usage.model.clone().unwrap_or_else(|| "-".into())),
+                kv(t("Diretório", "Directory"), s.cwd.clone()),
+                kv(t("Modelo", "Model"), s.usage.model.clone().unwrap_or_else(|| "-".into())),
                 kv(
-                    "Tempo",
-                    format!("iniciada há {} · última resposta há {}", fmt_ago(s.started_at), fmt_ago(s.usage.last_ts)),
+                    t("Tempo", "Time"),
+                    tr!("iniciada há {started} · última resposta há {last}", "started {started} ago · last reply {last} ago"),
                 ),
                 kv(
-                    "Paralelo",
-                    format!(
-                        "{} agentes rodando ({} no total) · {} tasks em background",
-                        s.agents_running, s.agents_total, s.tasks_running
+                    t("Paralelo", "Parallel"),
+                    tr!(
+                        "{ar} agentes rodando ({at} no total) · {tr_} tasks em background",
+                        "{ar} agents running ({at} total) · {tr_} background tasks"
                     ),
                 ),
                 match &s.pending {
                     Some(q) => Line::from(vec![
-                        Span::styled(format!("{:<14}", "Aguarda você"), Style::new().fg(DIM)),
+                        Span::styled(format!("{:<14}", t("Aguarda você", "Waiting on you")), Style::new().fg(DIM)),
                         Span::styled(q.clone(), Style::new().fg(Color::Magenta)),
                     ]),
-                    None => kv("Processo", format!("CPU {:.1}% · {} · {} processos filhos", s.cpu, fmt_mb(s.mem), s.procs.len())),
+                    None => kv(
+                        t("Processo", "Process"),
+                        tr!("CPU {cpu:.1}% · {mem} · {nproc} processos filhos", "CPU {cpu:.1}% · {mem} · {nproc} child processes"),
+                    ),
                 },
-                kv("Último prompt", s.last_prompt.clone().unwrap_or_default()),
+                kv(t("Último prompt", "Last prompt"), s.last_prompt.clone().unwrap_or_default()),
                 kv(
-                    "Sessão",
+                    t("Sessão", "Session"),
                     match &s.bg_id {
                         Some(id) => format!("{} · background {id}", s.session_id),
                         None => s.session_id.clone(),
@@ -936,13 +969,14 @@ fn draw_session_main(f: &mut Frame, area: Rect, app: &mut App) {
                 ),
                 kv("Transcript", s.transcript.as_ref().map(|p| p.display().to_string()).unwrap_or_default()),
                 Line::from({
-                    let mut v = vec![Span::styled(format!("{:<14}", "Comandos"), Style::new().fg(DIM))];
+                    let mut v = vec![Span::styled(format!("{:<14}", t("Comandos", "Commands")), Style::new().fg(DIM))];
+                    let (new, folder, remove) = (t("nova instância", "new instance"), t("pasta", "folder"), t("remover", "remove"));
                     let acts: Vec<(&str, &str)> = match (s.alive || s.status == "pendente", s.bg_id.is_some()) {
-                        (true, false) => vec![("x", "encerrar"), ("n", "nova instância"), ("e", "pasta"), ("c", "copiar resume")],
-                        (true, true) if !s.alive => vec![("o", "reabrir e responder"), ("d", "remover"), ("n", "nova instância"), ("e", "pasta")],
-                        (true, true) => vec![("o", "abrir (attach)"), ("x", "parar"), ("n", "nova instância"), ("e", "pasta")],
-                        (false, true) => vec![("o", "retomar"), ("d", "remover"), ("n", "nova instância"), ("e", "pasta")],
-                        (false, false) => vec![("o", "retomar numa aba"), ("d", "limpar"), ("n", "nova instância"), ("e", "pasta")],
+                        (true, false) => vec![("x", t("encerrar", "end")), ("n", new), ("e", folder), ("c", t("copiar resume", "copy resume"))],
+                        (true, true) if !s.alive => vec![("o", t("reabrir e responder", "reopen and reply")), ("d", remove), ("n", new), ("e", folder)],
+                        (true, true) => vec![("o", t("abrir (attach)", "open (attach)")), ("x", t("parar", "stop")), ("n", new), ("e", folder)],
+                        (false, true) => vec![("o", t("retomar", "resume")), ("d", remove), ("n", new), ("e", folder)],
+                        (false, false) => vec![("o", t("retomar numa aba", "resume in a tab")), ("d", t("limpar", "clear")), ("n", new), ("e", folder)],
                     };
                     for (k, d) in acts {
                         v.push(Span::styled(format!(" {k} "), Style::new().fg(Color::Black).bg(ACCENT).bold()));
@@ -954,13 +988,13 @@ fn draw_session_main(f: &mut Frame, area: Rect, app: &mut App) {
             f.render_widget(Paragraph::new(lines), info);
 
             let [tok, tools] = Layout::horizontal([Constraint::Length(30), Constraint::Min(10)]).areas(mid);
-            let extra = if s.agents_total > 0 { Some(("+ subagentes", s.agents_usage)) } else { None };
-            let t = Table::new(token_rows(&s.usage, extra), [Constraint::Length(15), Constraint::Length(10)])
+            let extra = if s.agents_total > 0 { Some((t("+ subagentes", "+ subagents"), s.agents_usage)) } else { None };
+            let tbl = Table::new(token_rows(&s.usage, extra), [Constraint::Length(15), Constraint::Length(10)])
                 .block(Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(DIM)).title(" Tokens "));
-            f.render_widget(t, tok);
+            f.render_widget(tbl, tok);
             let tl = tools_lines(&s.usage, tools.width.saturating_sub(2) as usize, tools.height.saturating_sub(2) as usize);
             f.render_widget(
-                Paragraph::new(tl).block(Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(DIM)).title(" Ferramentas ")),
+                Paragraph::new(tl).block(Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(DIM)).title(t(" Ferramentas ", " Tools "))),
                 tools,
             );
             sparkline_block(f, spark, &s.usage, Color::Magenta);
@@ -970,7 +1004,7 @@ fn draw_session_main(f: &mut Frame, area: Rect, app: &mut App) {
                     Block::bordered()
                         .border_type(BorderType::Rounded)
                         .border_style(Style::new().fg(DIM))
-                        .title(" Atividade recente  ( ] para ver tudo ) "),
+                        .title(t(" Atividade recente  ( ] para ver tudo ) ", " Recent activity  ( ] to see all ) ")),
                 ),
                 act,
             );
@@ -981,12 +1015,13 @@ fn draw_session_main(f: &mut Frame, area: Rect, app: &mut App) {
 fn draw_agent_main(f: &mut Frame, area: Rect, app: &mut App) {
     let Some(a) = app.selected_agent().cloned() else {
         f.render_widget(
-            Paragraph::new("Nenhum agente nesta lista. Use `a` para incluir os já terminados.").block(main_block(app, "Agente".into())),
+            Paragraph::new(t("Nenhum agente nesta lista. Use `a` para incluir os já terminados.", "No agent in this list. Press `a` to include finished ones."))
+                .block(main_block(app, t("Agente", "Agent").into())),
             area,
         );
         return;
     };
-    let block = main_block(app, format!("Agente {}", a.agent_type));
+    let block = main_block(app, tr!("Agente {}", "Agent {}", a.agent_type));
     let inner = block.inner(area);
     f.render_widget(block, area);
     if app.tab == 1 {
@@ -995,15 +1030,19 @@ fn draw_agent_main(f: &mut Frame, area: Rect, app: &mut App) {
     }
     let [info, mid, spark, act] =
         Layout::vertical([Constraint::Length(8), Constraint::Length(10), Constraint::Length(6), Constraint::Min(3)]).areas(inner);
-    let status = if a.running { Span::styled("● rodando", Style::new().fg(Color::Yellow)) } else { Span::styled("✓ terminado", Style::new().fg(Color::Green)) };
+    let status = match a.running {
+        true => Span::styled(t("● rodando", "● running"), Style::new().fg(Color::Yellow)),
+        false => Span::styled(t("✓ terminado", "✓ finished"), Style::new().fg(Color::Green)),
+    };
+    let last = fmt_ago(a.last_activity);
     let lines = vec![
         Line::from(Span::styled(a.description.clone(), Style::new().bold())),
         Line::from(vec![Span::styled(format!("{:<14}", "Status"), Style::new().fg(DIM)), status]),
-        kv("Tipo", a.agent_type.clone()),
-        kv("Sessão", a.session_name.clone()),
+        kv(t("Tipo", "Type"), a.agent_type.clone()),
+        kv(t("Sessão", "Session"), a.session_name.clone()),
         kv("Workflow", a.workflow.clone().unwrap_or_else(|| "-".into())),
-        kv("Modelo", a.usage.model.clone().unwrap_or_else(|| "-".into())),
-        kv("Atividade", format!("última resposta há {}", fmt_ago(a.last_activity))),
+        kv(t("Modelo", "Model"), a.usage.model.clone().unwrap_or_else(|| "-".into())),
+        kv(t("Atividade", "Activity"), tr!("última resposta há {last}", "last reply {last} ago")),
         kv("Id", a.agent_id.clone()),
     ];
     f.render_widget(Paragraph::new(lines), info);
@@ -1015,60 +1054,61 @@ fn draw_agent_main(f: &mut Frame, area: Rect, app: &mut App) {
     );
     let tl = tools_lines(&a.usage, tools.width.saturating_sub(2) as usize, tools.height.saturating_sub(2) as usize);
     f.render_widget(
-        Paragraph::new(tl).block(Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(DIM)).title(" Ferramentas ")),
+        Paragraph::new(tl).block(Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(DIM)).title(t(" Ferramentas ", " Tools "))),
         tools,
     );
     sparkline_block(f, spark, &a.usage, Color::Yellow);
     f.render_widget(
         Paragraph::new(event_lines(&a.events, 0))
-            .block(Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(DIM)).title(" Atividade recente ")),
+            .block(Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(DIM)).title(t(" Atividade recente ", " Recent activity "))),
         act,
     );
 }
 
 fn draw_task_main(f: &mut Frame, area: Rect, app: &mut App) {
-    let Some(t) = app.selected_task().cloned() else {
+    let Some(task) = app.selected_task().cloned() else {
         f.render_widget(
-            Paragraph::new("Nenhuma task nesta lista. Use `a` para incluir as já terminadas.").block(main_block(app, "Task".into())),
+            Paragraph::new(t("Nenhuma task nesta lista. Use `a` para incluir as já terminadas.", "No task in this list. Press `a` to include finished ones."))
+                .block(main_block(app, "Task".into())),
             area,
         );
         return;
     };
-    let block = main_block(app, format!("{} {}", t.kind.label(), t.id));
+    let block = main_block(app, format!("{} {}", task.kind.label(), task.id));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     if app.tab == 1 {
-        let dur = match (t.started, t.ended) {
+        let dur = match (task.started, task.ended) {
             (Some(s), Some(e)) => fmt_dur(e - s),
-            (Some(s), None) => format!("{} (em andamento)", fmt_dur(Local::now() - s)),
+            (Some(s), None) => tr!("{} (em andamento)", "{} (in progress)", fmt_dur(Local::now() - s)),
             _ => "-".into(),
         };
-        let (icon, st) = task_style(&t);
+        let (icon, st) = task_style(&task);
         let mut lines = vec![
-            Line::from(Span::styled(t.description.clone(), Style::new().bold())),
+            Line::from(Span::styled(task.description.clone(), Style::new().bold())),
             Line::from(vec![
                 Span::styled(format!("{:<14}", "Status"), Style::new().fg(DIM)),
-                Span::styled(format!("{icon} {}", task_status_text(&t)), st),
+                Span::styled(format!("{icon} {}", task_status_text(&task)), st),
             ]),
-            kv("Tipo", t.kind.label()),
-            kv("Sessão", t.session_name.clone()),
-            kv("Início", fmt_time(t.started)),
-            kv("Fim", fmt_time(t.ended)),
-            kv("Duração", dur),
-            kv("Saída", t.output_file.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "-".into())),
+            kv(t("Tipo", "Type"), task.kind.label()),
+            kv(t("Sessão", "Session"), task.session_name.clone()),
+            kv(t("Início", "Start"), fmt_time(task.started)),
+            kv(t("Fim", "End"), fmt_time(task.ended)),
+            kv(t("Duração", "Duration"), dur),
+            kv(t("Saída", "Output"), task.output_file.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "-".into())),
             Line::raw(""),
         ];
-        if let Some(cmd) = &t.command {
-            lines.push(Line::from(Span::styled("Comando", Style::new().fg(DIM))));
+        if let Some(cmd) = &task.command {
+            lines.push(Line::from(Span::styled(t("Comando", "Command"), Style::new().fg(DIM))));
             lines.push(Line::from(Span::styled(cmd.clone(), Style::new().fg(ACCENT))));
         }
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
         return;
     }
 
-    let Some(path) = t.output_file.clone() else {
-        f.render_widget(Paragraph::new(Span::styled("Sem arquivo de saída para esta task.", Style::new().fg(DIM))), inner);
+    let Some(path) = task.output_file.clone() else {
+        f.render_widget(Paragraph::new(Span::styled(t("Sem arquivo de saída para esta task.", "No output file for this task."), Style::new().fg(DIM))), inner);
         return;
     };
     let height = inner.height as usize;
@@ -1080,10 +1120,13 @@ fn draw_task_main(f: &mut Frame, area: Rect, app: &mut App) {
     let end = total - from_bottom;
     let start = end.saturating_sub(height);
     let text: Vec<Line> = lines[start..end].iter().map(|l| Line::raw(l.clone())).collect();
-    let p = if total == 0 { Paragraph::new(Span::styled("(saída vazia até agora)", Style::new().fg(DIM))) } else { Paragraph::new(text) };
+    let p = match total {
+        0 => Paragraph::new(Span::styled(t("(saída vazia até agora)", "(output empty so far)"), Style::new().fg(DIM))),
+        _ => Paragraph::new(text),
+    };
     f.render_widget(p, inner);
     if from_bottom > 0 {
-        let tag = format!(" ↑ {from_bottom} linhas acima do fim ");
+        let tag = tr!(" ↑ {from_bottom} linhas acima do fim ", " ↑ {from_bottom} lines above the end ");
         let w = tag.chars().count() as u16;
         let r = Rect { x: area.right().saturating_sub(w + 2), y: area.bottom() - 1, width: w, height: 1 };
         f.render_widget(Span::styled(tag, Style::new().fg(Color::Black).bg(Color::Yellow)), r);
@@ -1091,7 +1134,7 @@ fn draw_task_main(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_usage_main(f: &mut Frame, area: Rect, app: &mut App) {
-    let block = main_block(app, "Consumo de tokens".into());
+    let block = main_block(app, t("Consumo de tokens", "Token usage").into());
     let inner = block.inner(area);
     f.render_widget(block, area);
     let [chart, totals, models] =
@@ -1115,7 +1158,7 @@ fn draw_usage_main(f: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
     let bc = BarChart::default()
-        .block(Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(DIM)).title(" Tokens por dia "))
+        .block(Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(DIM)).title(t(" Tokens por dia ", " Tokens per day ")))
         .data(BarGroup::default().bars(&bars))
         .bar_width(bar_w)
         .bar_gap(1);
@@ -1126,23 +1169,27 @@ fn draw_usage_main(f: &mut Frame, area: Rect, app: &mut App) {
         app.snap.daily.iter().filter(|(d, _)| (today - **d).num_days() < k).map(|(_, t)| t.total()).sum()
     };
     let line = Line::from(vec![
-        Span::styled(" Hoje ", Style::new().fg(DIM)),
+        Span::styled(t(" Hoje ", " Today "), Style::new().fg(DIM)),
         Span::styled(fmt_tok(sum_days(1)), Style::new().fg(Color::Magenta).bold()),
-        Span::styled("   7 dias ", Style::new().fg(DIM)),
+        Span::styled(t("   7 dias ", "   7 days "), Style::new().fg(DIM)),
         Span::styled(fmt_tok(sum_days(7)), Style::new().fg(Color::Magenta).bold()),
-        Span::styled("   30 dias ", Style::new().fg(DIM)),
+        Span::styled(t("   30 dias ", "   30 days "), Style::new().fg(DIM)),
         Span::styled(fmt_tok(sum_days(30)), Style::new().fg(Color::Magenta).bold()),
-        Span::styled("   desde o início ", Style::new().fg(DIM)),
+        Span::styled(t("   desde o início ", "   all time "), Style::new().fg(DIM)),
         Span::styled(fmt_tok(sum_days(i64::MAX)), Style::new().fg(Color::Magenta).bold()),
     ]);
     let note = Line::from(Span::styled(
-        " total = entrada + cache escrita + cache leitura + saída (respostas deduplicadas por id)",
+        t(
+            " total = entrada + cache escrita + cache leitura + saída (respostas deduplicadas por id)",
+            " total = input + cache write + cache read + output (replies deduplicated by id)",
+        ),
         Style::new().fg(DIM).italic(),
     ));
     f.render_widget(Paragraph::new(vec![line, note]), totals);
 
     let Some((day, dt)) = app.selected_day() else { return };
-    let header = Row::new(vec!["Modelo", "Entrada", "Cache esc.", "Cache leit.", "Saída", "Total"]).style(Style::new().fg(DIM));
+    let header = Row::new(vec![t("Modelo", "Model"), t("Entrada", "Input"), t("Cache esc.", "Cache wr."), t("Cache leit.", "Cache rd."), t("Saída", "Output"), "Total"])
+        .style(Style::new().fg(DIM));
     let mut rows: Vec<Row> = Vec::new();
     if let Some(mm) = app.snap.daily_by_model.get(&day) {
         let mut v: Vec<(&String, &Tokens)> = mm.iter().filter(|(_, t)| t.total() > 0).collect();
@@ -1186,86 +1233,95 @@ fn draw_usage_main(f: &mut Frame, area: Rect, app: &mut App) {
         Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::new().fg(DIM))
-            .title(format!(" {} {} · {} sessões ativas ", weekday_pt(day, true), day.format("%d/%m/%Y"), sessions)),
+            .title(tr!(" {} {} · {sessions} sessões ativas ", " {} {} · {sessions} active sessions ", weekday(day), day.format("%d/%m/%Y"))),
     );
     f.render_widget(t, models);
 }
 
 fn draw_help(f: &mut Frame) {
     let area = f.area();
-    let w = 70.min(area.width.saturating_sub(4));
+    let w = 78.min(area.width.saturating_sub(4));
     let h = 40.min(area.height.saturating_sub(2));
     let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
-    let k = |key: &str, desc: &str| {
-        Line::from(vec![Span::styled(format!("  {key:<14}"), Style::new().fg(ACCENT).bold()), Span::raw(desc.to_string())])
-    };
-    let sec = |t: &str| Line::from(Span::styled(t.to_string(), Style::new().fg(FOCUS).bold()));
+    let k = |key: &'static str, desc: &'static str| Line::from(vec![Span::styled(format!("  {key:<14}"), Style::new().fg(ACCENT).bold()), Span::raw(desc)]);
+    let sec = |s: &'static str| Line::from(Span::styled(s, Style::new().fg(FOCUS).bold()));
+    let dot = |s: &'static str, c: Color| Span::styled(s, Style::new().fg(c));
     let lines = vec![
-        sec("Navegação"),
-        k("1 2 3 4", "ir para Sessões / Agentes / Tasks / Uso"),
-        k("Tab  h l ← →", "painel anterior / próximo"),
-        k("j k ↑ ↓", "mover seleção"),
-        k("g G Home End", "início / fim da lista"),
-        k("[ ]", "trocar aba do painel principal"),
-        k("J K PgUp PgDn", "rolar o painel principal"),
-        k("mouse", "roda rola o que está sob o cursor · clique seleciona"),
-        k("z  +", "zoom no painel principal"),
-        k("Esc", "sair do zoom / fechar ajuda"),
+        sec(t("Navegação", "Navigation")),
+        k("1 2 3 4", t("ir para Sessões / Agentes / Tasks / Uso", "go to Sessions / Agents / Tasks / Usage")),
+        k("Tab  h l ← →", t("painel anterior / próximo", "previous / next panel")),
+        k("j k ↑ ↓", t("mover seleção", "move selection")),
+        k("g G Home End", t("início / fim da lista", "top / bottom of the list")),
+        k("[ ]", t("trocar aba do painel principal", "switch main panel tab")),
+        k("J K PgUp PgDn", t("rolar o painel principal", "scroll the main panel")),
+        k("mouse", t("roda rola o que está sob o cursor · clique seleciona", "wheel scrolls what is under the cursor · click selects")),
+        k("z  +", t("zoom no painel principal", "zoom the main panel")),
+        k("Esc", t("sair do zoom / fechar ajuda", "leave zoom / close help")),
         Line::raw(""),
-        sec("Chat dentro do painel"),
-        k("Enter", "sessão: abrir/entrar no chat aqui (▣ = chat aberto)"),
-        k("F12  Ctrl+]", "devolver o teclado ao painel (o chat segue rodando)"),
-        k("Shift+PgUp/Dn", "rolar o chat"),
-        k("arrastar", "selecionar texto do chat e copiar (Ctrl+C copia de novo)"),
-        k("Ctrl+Enter", "quebrar linha no chat"),
+        sec(t("Chat dentro do painel", "Chat inside the panel")),
+        k("Enter", t("sessão: abrir/entrar no chat aqui (▣ = chat aberto)", "session: open/enter the chat here (▣ = chat open)")),
+        k("F12  Ctrl+]", t("devolver o teclado ao painel (o chat segue rodando)", "give the keyboard back to the panel (chat keeps running)")),
+        k("Shift+PgUp/Dn", t("rolar o chat", "scroll the chat")),
+        k(t("arrastar", "drag"), t("selecionar texto do chat e copiar (Ctrl+C copia de novo)", "select chat text and copy it (Ctrl+C copies again)")),
+        k("Ctrl+Enter", t("quebrar linha no chat", "new line in the chat")),
         Line::raw(""),
-        sec("Filtros"),
-        k("a", "mostrar tudo das últimas 24h (inclui encerrados)"),
-        k("f", "agentes/tasks só da sessão selecionada"),
+        sec(t("Filtros", "Filters")),
+        k("a", t("mostrar tudo das últimas 24h (inclui encerrados)", "show everything from the last 24h (including ended)")),
+        k("f", t("agentes/tasks só da sessão selecionada", "agents/tasks of the selected session only")),
         Line::raw(""),
-        sec("Ações"),
-        k("n", "nova instância (aqui no painel, aba nova ou background)"),
-        k("o", "sessão: retomar/attach numa aba nova · task: abrir saída"),
-        k("x", "parar shell/monitor · encerrar sessão (confirma)"),
-        k("d  D", "limpar item terminado / todos do painel"),
-        k("u", "desfazer a última limpeza"),
-        k("e", "abrir a pasta da sessão no Explorer"),
-        k("c", "copiar (claude --resume <id>, id, caminho…)"),
-        k("r", "forçar atualização"),
-        k("q  Ctrl+C", "sair"),
+        sec(t("Ações", "Actions")),
+        k("n", t("nova instância (aqui no painel, aba nova ou background)", "new instance (here in the panel, new tab or background)")),
+        k("o", t("sessão: retomar/attach numa aba nova · task: abrir saída", "session: resume/attach in a new tab · task: open output")),
+        k("x", t("parar shell/monitor · encerrar sessão (confirma)", "stop shell/monitor · end session (asks first)")),
+        k("d  D", t("limpar item terminado / todos do painel", "clear finished item / all in the panel")),
+        k("u", t("desfazer a última limpeza", "undo the last clear")),
+        k("e", t("abrir a pasta da sessão no Explorer", "open the session folder in Explorer")),
+        k("c", t("copiar (claude --resume <id>, id, caminho…)", "copy (claude --resume <id>, id, path…)")),
+        k("r", t("forçar atualização", "force refresh")),
+        k("q  Ctrl+C", t("sair", "quit")),
         Line::raw(""),
-        sec("Legenda"),
+        sec(t("Legenda", "Legend")),
         Line::from(vec![
-            Span::styled("  ● ", Style::new().fg(Color::Yellow)),
-            Span::raw("ocupada/rodando  "),
-            Span::styled("● ", Style::new().fg(Color::Green)),
-            Span::raw("ociosa  "),
-            Span::styled("● ", Style::new().fg(ACCENT)),
+            dot("  ● ", Color::Yellow),
+            Span::raw(t("ocupada/rodando  ", "busy/running  ")),
+            dot("● ", Color::Green),
+            Span::raw(t("ociosa  ", "idle  ")),
+            dot("● ", ACCENT),
             Span::raw("shell  "),
-            Span::styled("◐ ", Style::new().fg(Color::Magenta)),
-            Span::raw("espera  "),
-            Span::styled("○ ", Style::new().fg(DIM)),
-            Span::raw("encerrada"),
+            dot("◐ ", Color::Magenta),
+            Span::raw(t("espera  ", "waiting  ")),
+            dot("○ ", DIM),
+            Span::raw(t("encerrada", "ended")),
         ]),
         Line::from(vec![
-            Span::styled("  ✓ ", Style::new().fg(Color::Green)),
-            Span::raw("concluída  "),
-            Span::styled("✗ ", Style::new().fg(Color::Red)),
-            Span::raw("interrompida  "),
-            Span::styled("◌ ", Style::new().fg(DIM)),
-            Span::raw("monitor expirado  "),
-            Span::styled("? ", Style::new().fg(Color::Magenta)),
-            Span::raw("órfã"),
+            dot("  ✓ ", Color::Green),
+            Span::raw(t("concluída  ", "completed  ")),
+            dot("✗ ", Color::Red),
+            Span::raw(t("interrompida  ", "interrupted  ")),
+            dot("◌ ", DIM),
+            Span::raw(t("monitor expirado  ", "monitor expired  ")),
+            dot("? ", Color::Magenta),
+            Span::raw(t("órfã", "orphan")),
         ]),
-        Line::from(vec![Span::raw("  "), Span::styled("⚑n", Style::new().fg(Color::Yellow)), Span::raw(" agentes rodando  "), Span::styled("⚙n", Style::new().fg(Color::Yellow)), Span::raw(" tasks rodando")]),
+        Line::from(vec![
+            Span::raw("  "),
+            dot("⚑n", Color::Yellow),
+            Span::raw(t(" agentes rodando  ", " agents running  ")),
+            dot("⚙n", Color::Yellow),
+            Span::raw(t(" tasks rodando", " tasks running")),
+        ]),
     ];
+    // Sobre: versão no título; licença, autores e repositório na borda de baixo
+    // (fica à vista mesmo quando a tela é baixa e a lista é cortada).
+    let about = format!(" {} · {} · {} ", crate::update::LICENSE, crate::update::authors(), crate::update::REPO.trim_start_matches("https://"));
     f.render_widget(Clear, r);
     f.render_widget(
         Paragraph::new(Text::from(lines)).block(
             Block::bordered()
                 .border_type(BorderType::Thick)
                 .border_style(Style::new().fg(FOCUS))
-                .title(format!(" Ajuda · v{} ", crate::update::VERSION))
+                .title(tr!(" Ajuda · agent-dash v{} ", " Help · agent-dash v{} ", crate::update::VERSION))
+                .title_bottom(Line::from(about).fg(Color::Gray))
                 .title_alignment(Alignment::Center),
         ),
         r,

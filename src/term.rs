@@ -47,12 +47,12 @@ impl Term {
 
     pub fn spawn_program(program: &str, key: String, title: String, cwd: &str, args: &[String], rows: u16, cols: u16) -> Result<Term, String> {
         if !std::path::Path::new(cwd).is_dir() {
-            return Err(format!("diretório não existe: {cwd}"));
+            return Err(crate::i18n::tr!("diretório não existe: {cwd}", "directory does not exist: {cwd}"));
         }
         let (rows, cols) = (rows.max(5), cols.max(20));
         let pair = native_pty_system()
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-            .map_err(|e| format!("não consegui criar o terminal: {e}"))?;
+            .map_err(|e| crate::i18n::tr!("não consegui criar o terminal: {e}", "could not create the terminal: {e}"))?;
         let mut cmd = CommandBuilder::new(program);
         cmd.args(args);
         cmd.cwd(cwd);
@@ -62,7 +62,7 @@ impl Term {
         // não deve se comportar como filho dela (senão não salva a conversa).
         cmd.env_remove("CLAUDE_CODE_CHILD_SESSION");
         cmd.env_remove("CLAUDECODE");
-        let child = pair.slave.spawn_command(cmd).map_err(|e| format!("não consegui iniciar o claude: {e}"))?;
+        let child = pair.slave.spawn_command(cmd).map_err(|e| crate::i18n::tr!("não consegui iniciar o claude: {e}", "could not start claude: {e}"))?;
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| e.to_string())?));

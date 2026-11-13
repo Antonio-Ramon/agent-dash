@@ -1,8 +1,11 @@
 [package]
 name = "agent-dash"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2024"
 description = "Dashboard TUI (estilo lazygit) para monitorar sessões, agentes, shells e consumo de tokens do Claude Code"
+authors = ["Antonio Ramon", "Mateus Cristo"]
+license = "MIT"
+repository = "https://github.com/Antonio-Ramon/agent-dash"
 
 [dependencies]
 anyhow = "1.0.104"

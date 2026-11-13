@@ -484,7 +484,7 @@ impl FileState {
                 raw_command: tu.raw_cmd.clone(),
                 requested: tu.ts,
             });
-            self.push_event(ts, EventKind::Notice, format!("▶ {} {id} iniciado: {description}", kind.label()));
+            self.push_event(ts, EventKind::Notice, crate::i18n::tr!("▶ {} {id} iniciado: {description}", "▶ {} {id} started: {description}", kind.label()));
             return;
         }
 

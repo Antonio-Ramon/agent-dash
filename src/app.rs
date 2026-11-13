@@ -2,6 +2,7 @@
 
 use crate::actions::{Action, LaunchSpec, MODELS};
 use crate::collector::Ctl;
+use crate::i18n::{t, tr};
 use crate::model::*;
 use crate::term::{self, Term};
 use chrono::{Local, NaiveDate};
@@ -37,10 +38,15 @@ impl Panel {
     }
 
     pub fn tabs(self) -> &'static [&'static str] {
+        let en = crate::i18n::en();
         match self {
+            Panel::Sessions if en => &["Summary", "Activity", "Processes", "Chat"],
             Panel::Sessions => &["Resumo", "Atividade", "Processos", "Chat"],
+            Panel::Agents if en => &["Summary", "Activity"],
             Panel::Agents => &["Resumo", "Atividade"],
+            Panel::Tasks if en => &["Output", "Details"],
             Panel::Tasks => &["Saída", "Detalhes"],
+            Panel::Usage if en => &["History"],
             Panel::Usage => &["Histórico"],
         }
     }
@@ -265,10 +271,13 @@ impl App {
         }
         let n = saved.len();
         let mut body: Vec<String> = saved.iter().map(|c| format!("• {} — {}", c.title, c.cwd)).collect();
-        body.push("Estavam abertas aqui quando o dashboard fechou da última vez.".into());
-        body.push("y retoma cada conversa de onde parou; n descarta esta lista.".into());
+        body.push(t("Estavam abertas aqui quando o dashboard fechou da última vez.", "They were open here when the dashboard last closed.").into());
+        body.push(t("y retoma cada conversa de onde parou; n descarta esta lista.", "y resumes each conversation where it stopped; n discards this list.").into());
         self.confirm = Some(Confirm {
-            title: if n == 1 { "Reabrir a sessão que ficou aberta".into() } else { format!("Reabrir as {n} sessões que ficaram abertas") },
+            title: match n {
+                1 => t("Reabrir a sessão que ficou aberta", "Reopen the session left open").into(),
+                _ => tr!("Reabrir as {n} sessões que ficaram abertas", "Reopen the {n} sessions left open"),
+            },
             body,
             action: None,
             quit: false,
@@ -284,7 +293,7 @@ impl App {
             // Ainda rodando em algum lugar (outra aba, outro dashboard): retomar
             // poria dois processos na mesma conversa.
             if self.snap.sessions.iter().any(|s| s.session_id == c.session_id && s.alive) {
-                failed.push(format!("{} (ainda está rodando)", c.title));
+                failed.push(tr!("{} (ainda está rodando)", "{} (still running)", c.title));
                 continue;
             }
             let n = self.terms.len();
@@ -298,9 +307,9 @@ impl App {
         self.save_open_chats();
         let ok = self.terms.len() - before;
         if failed.is_empty() {
-            self.flash(format!("{ok} sessão(ões) reaberta(s) · Enter entra no chat"));
+            self.flash(tr!("{ok} sessão(ões) reaberta(s) · Enter entra no chat", "{ok} session(s) reopened · Enter goes into the chat"));
         } else {
-            self.flash(format!("{ok} reaberta(s); não consegui reabrir: {}", failed.join(", ")));
+            self.flash(tr!("{ok} reaberta(s); não consegui reabrir: {}", "{ok} reopened; could not reopen: {}", failed.join(", ")));
         }
     }
 
@@ -497,8 +506,8 @@ impl App {
 
     fn go_panel(&mut self, p: Panel) {
         if self.panel_empty(p) && self.focus != p {
-            let what = if p == Panel::Agents { "nenhum agente" } else { "nenhuma task" };
-            self.flash(format!("{what} no momento (a mostra os terminados nas últimas 24h)"));
+            let what = if p == Panel::Agents { t("nenhum agente", "no agent") } else { t("nenhuma task", "no task") };
+            self.flash(tr!("{what} no momento (a mostra os terminados nas últimas 24h)", "{what} right now (a shows the ones finished in the last 24h)"));
             return;
         }
         self.set_focus(p);
@@ -565,11 +574,14 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => {
                     let c = self.confirm.take().unwrap();
                     if c.restore.is_empty() {
-                        self.flash("cancelado");
+                        self.flash(t("cancelado", "cancelled"));
                     } else {
                         // Recusou: esquece a lista (grava a atual, vazia).
                         self.save_open_chats();
-                        self.flash("sessões não reabertas · a mostra as encerradas, Enter retoma uma delas");
+                        self.flash(t(
+                        "sessões não reabertas · a mostra as encerradas, Enter retoma uma delas",
+                        "sessions not reopened · a shows the ended ones, Enter resumes one of them",
+                    ));
                     }
                 }
                 _ => {}
@@ -628,17 +640,23 @@ impl App {
             KeyCode::Char('a') => {
                 self.show_all = !self.show_all;
                 self.resync();
-                self.flash(if self.show_all { "mostrando tudo (últimas 24h)" } else { "mostrando só o que está ativo/recente" });
+                self.flash(match self.show_all {
+                    true => t("mostrando tudo (últimas 24h)", "showing everything (last 24h)"),
+                    false => t("mostrando só o que está ativo/recente", "showing only what is active/recent"),
+                });
             }
             KeyCode::Char('f') => {
                 self.only_selected = !self.only_selected;
                 self.resync();
-                self.flash(if self.only_selected { "agentes/tasks: só da sessão selecionada" } else { "agentes/tasks: todas as sessões" });
+                self.flash(match self.only_selected {
+                    true => t("agentes/tasks: só da sessão selecionada", "agents/tasks: selected session only"),
+                    false => t("agentes/tasks: todas as sessões", "agents/tasks: all sessions"),
+                });
             }
             KeyCode::Char('r') => {
                 let _ = ctl.send(Ctl::Refresh);
                 self.tail = None;
-                self.flash("atualizando…");
+                self.flash(t("atualizando…", "refreshing…"));
             }
             KeyCode::Char('c') => self.copy(),
             KeyCode::Char('o') => self.open(ctl),
@@ -795,13 +813,14 @@ impl App {
             term::text_between(&mut p, a, b)
         };
         if text.trim().is_empty() {
-            self.flash("nada selecionado");
+            self.flash(t("nada selecionado", "nothing selected"));
             return;
         }
         let n = text.lines().count();
+        let s = if n == 1 { "" } else { "s" };
         match set_clipboard(&text) {
-            Ok(()) => self.flash(format!("{n} linha{} copiada{}", if n == 1 { "" } else { "s" }, if n == 1 { "" } else { "s" })),
-            Err(e) => self.flash(format!("falha ao copiar: {e}")),
+            Ok(()) => self.flash(tr!("{n} linha{s} copiada{s}", "{n} line{s} copied")),
+            Err(e) => self.flash(tr!("falha ao copiar: {e}", "copy failed: {e}")),
         }
     }
 
@@ -839,8 +858,8 @@ impl App {
         };
         let Some(text) = text else { return };
         match set_clipboard(&text) {
-            Ok(()) => self.flash(format!("copiado: {text}")),
-            Err(e) => self.flash(format!("falha ao copiar: {e}")),
+            Ok(()) => self.flash(tr!("copiado: {text}", "copied: {text}")),
+            Err(e) => self.flash(tr!("falha ao copiar: {e}", "copy failed: {e}")),
         }
     }
 
@@ -851,11 +870,11 @@ impl App {
             Panel::Sessions => {
                 let Some(s) = self.selected_session().cloned() else { return };
                 if s.alive && s.bg_id.is_none() {
-                    self.flash(format!("{} já está aberta em outro terminal (pid {})", s.name, s.pid.unwrap_or(0)));
+                    self.flash(tr!("{} já está aberta em outro terminal (pid {})", "{} is already open in another terminal (pid {})", s.name, s.pid.unwrap_or(0)));
                     return;
                 }
                 if s.cwd.is_empty() {
-                    self.flash("não sei o diretório desta sessão");
+                    self.flash(t("não sei o diretório desta sessão", "this session's directory is unknown"));
                     return;
                 }
                 let a = match (&s.bg_id, s.alive || s.status == "pendente") {
@@ -863,7 +882,7 @@ impl App {
                     _ => Action::Resume { session_id: s.session_id.clone(), cwd: s.cwd.clone(), name: s.name.clone() },
                 };
                 let _ = ctl.send(Ctl::Act(a));
-                self.flash(format!("abrindo {}…", s.name));
+                self.flash(tr!("abrindo {}…", "opening {}…", s.name));
             }
             Panel::Agents => self.explore(),
             Panel::Tasks => self.launch_viewer(),
@@ -879,12 +898,12 @@ impl App {
             Panel::Usage => None,
         };
         let Some(cwd) = sid.and_then(|id| self.snap.sessions.iter().find(|s| s.session_id == id)).map(|s| s.cwd.clone()) else {
-            self.flash("nada para abrir aqui");
+            self.flash(t("nada para abrir aqui", "nothing to open here"));
             return;
         };
         match Command::new("explorer").arg(&cwd).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
-            Ok(_) => self.flash(format!("abrindo {cwd}")),
-            Err(e) => self.flash(format!("falha ao abrir: {e}")),
+            Ok(_) => self.flash(tr!("abrindo {cwd}", "opening {cwd}")),
+            Err(e) => self.flash(tr!("falha ao abrir: {e}", "open failed: {e}")),
         }
     }
 
@@ -892,12 +911,12 @@ impl App {
         let target: Option<(String, PathBuf)> =
             self.selected_task().and_then(|t| t.output_file.clone()).map(|p| ("notepad".to_string(), p));
         let Some((prog, path)) = target else {
-            self.flash("nada para abrir aqui");
+            self.flash(t("nada para abrir aqui", "nothing to open here"));
             return;
         };
         match Command::new(&prog).arg(&path).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
-            Ok(_) => self.flash(format!("abrindo {}", path.display())),
-            Err(e) => self.flash(format!("falha ao abrir: {e}")),
+            Ok(_) => self.flash(tr!("abrindo {}", "opening {}", path.display())),
+            Err(e) => self.flash(tr!("falha ao abrir: {e}", "open failed: {e}")),
         }
     }
 
@@ -920,9 +939,9 @@ impl App {
                 self.chat_key = Some(key);
                 self.chat_focus = true;
                 self.resync();
-                self.flash(format!("chat {title} aberto · F12 volta ao painel"));
+                self.flash(tr!("chat {title} aberto · F12 volta ao painel", "chat {title} open · F12 returns to the panel"));
             }
-            Err(e) => self.flash(format!("falha ao abrir o chat: {e}")),
+            Err(e) => self.flash(tr!("falha ao abrir o chat: {e}", "could not open the chat: {e}")),
         }
     }
 
@@ -937,15 +956,16 @@ impl App {
         }
         let waiting = s.status == "pendente";
         if s.alive && s.bg_id.is_none() {
-            self.flash(format!(
+            self.flash(tr!(
                 "{} está aberta em outro terminal (pid {}). Para conversar aqui: x encerra, depois Enter retoma no painel",
+                "{} is open in another terminal (pid {}). To chat here: x ends it, then Enter resumes it in the panel",
                 s.name,
                 s.pid.unwrap_or(0)
             ));
             return;
         }
         if s.cwd.is_empty() {
-            self.flash("não sei o diretório desta sessão");
+            self.flash(t("não sei o diretório desta sessão", "this session's directory is unknown"));
             return;
         }
         let args: Vec<String> = match &s.bg_id {
@@ -1026,7 +1046,8 @@ impl App {
                     }
                 }
                 let last = t.last_line();
-                self.flash(format!("chat {} encerrado{}", t.title, if last.is_empty() { String::new() } else { format!(": {last}") }));
+                let last = if last.is_empty() { String::new() } else { format!(": {last}") };
+                self.flash(tr!("chat {} encerrado{last}", "chat {} ended{last}", t.title));
             } else {
                 i += 1;
             }
@@ -1040,10 +1061,17 @@ impl App {
         }
         let n = self.terms.len();
         let mut body: Vec<String> = self.terms.iter().map(|t| format!("• {}", t.title)).collect();
-        body.push("Os chats abertos aqui dentro fecham junto com o dashboard.".into());
-        body.push("As conversas ficam salvas; ao abrir o dashboard de novo ele oferece reabri-las.".into());
+        body.push(t("Os chats abertos aqui dentro fecham junto com o dashboard.", "The chats open in here close together with the dashboard.").into());
+        body.push(
+            t(
+                "As conversas ficam salvas; ao abrir o dashboard de novo ele oferece reabri-las.",
+                "The conversations stay saved; the dashboard offers to reopen them next time it opens.",
+            )
+            .into(),
+        );
+        let s = if n == 1 { "" } else { "s" };
         self.confirm = Some(Confirm {
-            title: format!("Sair e fechar {n} chat{}", if n == 1 { "" } else { "s" }),
+            title: tr!("Sair e fechar {n} chat{s}", "Quit and close {n} chat{s}"),
             body,
             action: None,
             quit: true,
@@ -1064,70 +1092,91 @@ impl App {
             Panel::Sessions => {
                 let Some(s) = self.selected_session().cloned() else { return };
                 if s.status == "pendente" {
-                    self.flash(format!("{} não está rodando: está parada esperando sua resposta. o reabre, d remove", s.name));
+                    self.flash(tr!(
+                        "{} não está rodando: está parada esperando sua resposta. o reabre, d remove",
+                        "{} is not running: it stopped waiting for your reply. o reopens, d removes",
+                        s.name
+                    ));
                     return;
                 }
                 if !s.alive {
-                    self.flash(format!("{} já está encerrada", s.name));
+                    self.flash(tr!("{} já está encerrada", "{} has already ended", s.name));
                     return;
                 }
                 if let (Some(id), None) = (&s.bg_id, s.pid) {
                     self.ask(
-                        format!("Parar a sessão em background {}", s.name),
-                        vec![format!("Roda `claude stop {id}`."), "A conversa fica salva: `o` reabre depois.".into()],
+                        tr!("Parar a sessão em background {}", "Stop the background session {}", s.name),
+                        vec![
+                            tr!("Roda `claude stop {id}`.", "Runs `claude stop {id}`."),
+                            t("A conversa fica salva: `o` reabre depois.", "The conversation stays saved: `o` reopens it later.").into(),
+                        ],
                         Action::StopBg { id: id.clone(), name: s.name.clone() },
                     );
                 } else {
+                    let (pid, n) = (s.pid.unwrap_or(0), s.procs.len());
                     let mut body = vec![
-                        format!("Finaliza o processo {} e os filhos dele ({} processos).", s.pid.unwrap_or(0), s.procs.len()),
-                        "O que estiver sendo feito agora é interrompido.".into(),
-                        "A conversa fica salva: depois, `a` mostra as encerradas e `o` retoma.".into(),
+                        tr!("Finaliza o processo {pid} e os filhos dele ({n} processos).", "Kills process {pid} and its children ({n} processes)."),
+                        t("O que estiver sendo feito agora é interrompido.", "Whatever it is doing right now is interrupted.").into(),
+                        t(
+                            "A conversa fica salva: depois, `a` mostra as encerradas e `o` retoma.",
+                            "The conversation stays saved: later, `a` shows the ended ones and `o` resumes it.",
+                        )
+                        .into(),
                     ];
                     if s.status == "busy" {
-                        body.insert(0, "⚠ A sessão está ocupada neste momento.".into());
+                        body.insert(0, t("⚠ A sessão está ocupada neste momento.", "⚠ The session is busy right now.").into());
                     }
                     if s.agents_running + s.tasks_running > 0 {
-                        body.insert(0, format!("⚠ {} agentes e {} tasks rodando serão interrompidos.", s.agents_running, s.tasks_running));
+                        let (ar, tr_) = (s.agents_running, s.tasks_running);
+                        body.insert(0, tr!("⚠ {ar} agentes e {tr_} tasks rodando serão interrompidos.", "⚠ {ar} running agents and {tr_} tasks will be interrupted."));
                     }
-                    self.ask(format!("Encerrar a sessão {}", s.name), body, Action::KillSession { session_id: s.session_id.clone() });
+                    self.ask(tr!("Encerrar a sessão {}", "End the session {}", s.name), body, Action::KillSession { session_id: s.session_id.clone() });
                 }
             }
             Panel::Tasks => {
-                let Some(t) = self.selected_task().cloned() else { return };
-                if t.status != TaskStatus::Running {
-                    self.flash("esta task não está rodando (use d para limpar da lista)");
+                let Some(task) = self.selected_task().cloned() else { return };
+                if task.status != TaskStatus::Running {
+                    self.flash(t("esta task não está rodando (use d para limpar da lista)", "this task is not running (d clears it from the list)"));
                     return;
                 }
-                match t.kind {
+                match task.kind {
                     TaskKind::Shell | TaskKind::Monitor => {
-                        let mut body = vec![format!("Sessão: {}", t.session_name)];
-                        if let Some(c) = &t.command {
-                            body.push(format!("Comando: {}", c.chars().take(200).collect::<String>()));
+                        let mut body = vec![tr!("Sessão: {}", "Session: {}", task.session_name)];
+                        if let Some(c) = &task.command {
+                            body.push(tr!("Comando: {}", "Command: {}", c.chars().take(200).collect::<String>()));
                         }
-                        body.push("Finaliza o processo do shell e os filhos dele; a sessão recebe o aviso de que a task terminou.".into());
+                        body.push(
+                            t(
+                                "Finaliza o processo do shell e os filhos dele; a sessão recebe o aviso de que a task terminou.",
+                                "Kills the shell process and its children; the session is told the task finished.",
+                            )
+                            .into(),
+                        );
                         self.ask(
-                            format!("Parar {} {}", t.kind.label(), t.id),
+                            tr!("Parar {} {}", "Stop {} {}", task.kind.label(), task.id),
                             body,
-                            Action::StopTask { session_id: t.session_id.clone(), task_id: t.id.clone() },
+                            Action::StopTask { session_id: task.session_id.clone(), task_id: task.id.clone() },
                         );
                     }
-                    _ => self.flash(format!(
+                    _ => self.flash(tr!(
                         "{} roda dentro do processo da sessão {}: pare pela própria sessão (TaskStop) ou encerre a sessão no painel 1",
-                        t.kind.label(),
-                        t.session_name
+                        "{} runs inside the process of session {}: stop it from the session itself (TaskStop) or end the session in panel 1",
+                        task.kind.label(),
+                        task.session_name
                     )),
                 }
             }
             Panel::Agents => {
                 let Some(a) = self.selected_agent() else { return };
                 if a.running {
-                    let msg = format!(
+                    let msg = tr!(
                         "subagentes rodam dentro do processo da sessão {}: não dá para parar só um daqui. Encerre a sessão no painel 1 (x)",
+                        "subagents run inside the process of session {}: one alone cannot be stopped from here. End the session in panel 1 (x)",
                         a.session_name
                     );
                     self.flash(msg);
                 } else {
-                    self.flash("este agente já terminou (use d para limpar da lista)");
+                    self.flash(t("este agente já terminou (use d para limpar da lista)", "this agent has already finished (d clears it from the list)"));
                 }
             }
             Panel::Usage => {}
@@ -1140,13 +1189,19 @@ impl App {
             (Panel::Sessions, false) => {
                 let Some(s) = self.selected_session().cloned() else { return };
                 if s.alive {
-                    self.flash("sessão ativa: encerre antes com x");
+                    self.flash(t("sessão ativa: encerre antes com x", "active session: end it first with x"));
                     return;
                 }
                 if let Some(id) = &s.bg_id {
                     self.ask(
-                        format!("Remover a sessão em background {}", s.name),
-                        vec![format!("Roda `claude rm {id}`: apaga a sessão em background (e a worktree dela, quando for seguro)."), "Não dá para desfazer.".into()],
+                        tr!("Remover a sessão em background {}", "Remove the background session {}", s.name),
+                        vec![
+                            tr!(
+                                "Roda `claude rm {id}`: apaga a sessão em background (e a worktree dela, quando for seguro).",
+                                "Runs `claude rm {id}`: deletes the background session (and its worktree, when safe)."
+                            ),
+                            t("Não dá para desfazer.", "This cannot be undone.").into(),
+                        ],
                         Action::RemoveBg { id: id.clone(), name: s.name.clone() },
                     );
                     if let Some(c) = self.confirm.as_mut() {
@@ -1159,7 +1214,7 @@ impl App {
             (Panel::Sessions, true) => self.sessions().iter().filter(|s| !s.alive).map(|s| format!("s:{}", s.session_id)).collect(),
             (Panel::Agents, false) => match self.selected_agent() {
                 Some(a) if a.running => {
-                    self.flash("agente rodando: não dá para limpar");
+                    self.flash(t("agente rodando: não dá para limpar", "agent running: cannot clear it"));
                     return;
                 }
                 Some(a) => vec![format!("a:{}", a.agent_id)],
@@ -1167,8 +1222,8 @@ impl App {
             },
             (Panel::Agents, true) => self.agents().iter().filter(|a| !a.running).map(|a| format!("a:{}", a.agent_id)).collect(),
             (Panel::Tasks, false) => match self.selected_task() {
-                Some(t) if t.status == TaskStatus::Running => {
-                    self.flash("task rodando: pare antes com x");
+                Some(task) if task.status == TaskStatus::Running => {
+                    self.flash(t("task rodando: pare antes com x", "task running: stop it first with x"));
                     return;
                 }
                 Some(t) => vec![format!("t:{}:{}", t.session_id, t.id)],
@@ -1183,7 +1238,7 @@ impl App {
             (Panel::Usage, _) => return,
         };
         if keys.is_empty() {
-            self.flash("nada terminado para limpar");
+            self.flash(t("nada terminado para limpar", "nothing finished to clear"));
             return;
         }
         let n = keys.len();
@@ -1194,12 +1249,13 @@ impl App {
             self.show_all = false;
         }
         self.resync();
-        self.flash(format!("{n} {} da lista (u desfaz · a mostra tudo)", if n == 1 { "item limpo" } else { "itens limpos" }));
+        let what = if n == 1 { t("item limpo", "item cleared") } else { t("itens limpos", "items cleared") };
+        self.flash(tr!("{n} {what} da lista (u desfaz · a mostra tudo)", "{n} {what} from the list (u undoes · a shows all)"));
     }
 
     fn undo_dismiss(&mut self) {
         if self.last_hidden.is_empty() {
-            self.flash("nada para desfazer");
+            self.flash(t("nada para desfazer", "nothing to undo"));
             return;
         }
         let n = self.last_hidden.len();
@@ -1208,7 +1264,7 @@ impl App {
         }
         self.save_hidden();
         self.resync();
-        self.flash(format!("{n} itens de volta na lista"));
+        self.flash(tr!("{n} itens de volta na lista", "{n} items back in the list"));
     }
 
     fn open_launcher(&mut self) {
@@ -1270,7 +1326,7 @@ impl App {
             }
             KeyCode::Enter => {
                 let Some(cwd) = f.chosen(&repos) else {
-                    f.error = Some("escolha um repositório da lista ou digite um caminho que exista".into());
+                    f.error = Some(t("escolha um repositório da lista ou digite um caminho que exista", "pick a repository from the list or type a path that exists").into());
                     return;
                 };
                 let spec = LaunchSpec {
@@ -1291,10 +1347,10 @@ impl App {
                     self.spawn_chat(sid, title, &cwd, &args);
                     return;
                 }
-                let modo = if spec.background { "em background" } else { "numa aba nova" };
+                let modo = if spec.background { t("em background", "in background") } else { t("numa aba nova", "in a new tab") };
                 self.launcher = None;
                 let _ = ctl.send(Ctl::Act(Action::Launch(spec)));
-                self.flash(format!("iniciando instância {modo} em {cwd}…"));
+                self.flash(tr!("iniciando instância {modo} em {cwd}…", "starting instance {modo} in {cwd}…"));
                 return;
             }
             _ => {}
@@ -1306,7 +1362,7 @@ impl App {
         let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         let fresh = self.tail.as_ref().is_some_and(|t| t.path == path && t.len == len);
         if !fresh {
-            let lines = read_tail(path, len).unwrap_or_else(|e| vec![format!("(não consegui ler: {e})")]);
+            let lines = read_tail(path, len).unwrap_or_else(|e| vec![tr!("(não consegui ler: {e})", "(could not read: {e})")]);
             self.tail = Some(TailCache { path: path.to_path_buf(), len, lines });
         }
         &self.tail.as_ref().unwrap().lines
@@ -1385,7 +1441,7 @@ pub fn set_clipboard(text: &str) -> std::io::Result<()> {
             std::thread::sleep(Duration::from_millis(20));
         }
         if !opened {
-            return Err(err("área de transferência ocupada"));
+            return Err(err(t("área de transferência ocupada", "clipboard busy")));
         }
         let result = (|| {
             if EmptyClipboard() == 0 {
@@ -1416,5 +1472,5 @@ pub fn set_clipboard(text: &str) -> std::io::Result<()> {
 
 #[cfg(not(windows))]
 pub fn set_clipboard(_text: &str) -> std::io::Result<()> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "área de transferência só no Windows"))
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, t("área de transferência só no Windows", "clipboard is Windows-only")))
 }

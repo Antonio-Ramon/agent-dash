@@ -53,7 +53,7 @@ impl TaskKind {
             TaskKind::Shell => "shell",
             TaskKind::Monitor => "monitor",
             TaskKind::Workflow => "workflow",
-            TaskKind::Agent => "agente",
+            TaskKind::Agent => crate::i18n::t("agente", "agent"),
         }
     }
 }

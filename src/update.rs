@@ -5,11 +5,19 @@
 //! (sem rede, sem curl, download estranho) é silenciosa e o dashboard abre na
 //! versão que está instalada.
 
+use crate::i18n::{t, tr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-const REPO: &str = "https://github.com/Antonio-Ramon/agent-dash";
+pub const REPO: &str = env!("CARGO_PKG_REPOSITORY");
+
+pub const LICENSE: &str = env!("CARGO_PKG_LICENSE");
+
+/// Autores do Cargo.toml: "Antonio Ramon, Mateus Cristo".
+pub fn authors() -> String {
+    env!("CARGO_PKG_AUTHORS").replace(':', ", ")
+}
 /// Nome do executável publicado em cada release.
 const ASSET: &str = "agent-dash.exe";
 
@@ -52,17 +60,20 @@ pub fn install(new: &Path, exe: &Path, expected: &str) -> Result<(), String> {
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
-        .map_err(|e| format!("o executável baixado não roda: {e}"))?;
+        .map_err(|e| tr!("o executável baixado não roda: {e}", "the downloaded executable does not run: {e}"))?;
     let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if said != format!("agent-dash {expected}") {
-        return Err(format!("o executável baixado respondeu {said:?}, esperava a versão {expected}"));
+        return Err(tr!(
+            "o executável baixado respondeu {said:?}, esperava a versão {expected}",
+            "the downloaded executable answered {said:?}, expected version {expected}"
+        ));
     }
     let old = sibling(exe, "old");
     let _ = std::fs::remove_file(&old);
-    std::fs::rename(exe, &old).map_err(|e| format!("não consegui mover o executável atual: {e}"))?;
+    std::fs::rename(exe, &old).map_err(|e| tr!("não consegui mover o executável atual: {e}", "could not move the current executable: {e}"))?;
     if let Err(e) = std::fs::rename(new, exe) {
         let _ = std::fs::rename(&old, exe);
-        return Err(format!("não consegui instalar o executável novo: {e}"));
+        return Err(tr!("não consegui instalar o executável novo: {e}", "could not install the new executable: {e}"));
     }
     Ok(())
 }
@@ -97,7 +108,7 @@ pub fn auto() -> Option<i32> {
         Outcome::UpToDate => None,
         Outcome::Skipped(why) => {
             if !why.is_empty() {
-                println!("{why}; abrindo a versão {VERSION}.");
+                println!("{}", tr!("{why}; abrindo a versão {VERSION}.", "{why}; opening version {VERSION}."));
             }
             None
         }
@@ -123,13 +134,13 @@ pub fn run() -> Outcome {
         return Outcome::Skipped(String::new());
     }
     let Some(latest) = latest_version() else {
-        return Outcome::Skipped("não consegui consultar o GitHub".into());
+        return Outcome::Skipped(t("não consegui consultar o GitHub", "could not reach GitHub").into());
     };
     match (parse_version(&latest), parse_version(VERSION)) {
         (Some(l), Some(v)) if l > v => {}
         _ => return Outcome::UpToDate,
     }
-    println!("agent-dash {VERSION} -> {latest}: baixando a atualização…");
+    println!("{}", tr!("agent-dash {VERSION} -> {latest}: baixando a atualização…", "agent-dash {VERSION} -> {latest}: downloading the update…"));
     let new = sibling(&exe, "new");
     let ok = Command::new("curl")
         .args(["-sfL", "--max-time", "120", "-o"])
@@ -140,13 +151,13 @@ pub fn run() -> Outcome {
         .is_ok_and(|s| s.success());
     if !ok {
         let _ = std::fs::remove_file(&new);
-        return Outcome::Skipped("não consegui baixar a atualização".into());
+        return Outcome::Skipped(t("não consegui baixar a atualização", "could not download the update").into());
     }
     match install(&new, &exe, &latest) {
         Ok(()) => Outcome::Relaunched(relaunch(&exe)),
         Err(e) => {
             let _ = std::fs::remove_file(&new);
-            Outcome::Skipped(format!("atualização não aplicada ({e})"))
+            Outcome::Skipped(tr!("atualização não aplicada ({e})", "update not applied ({e})"))
         }
     }
 }
