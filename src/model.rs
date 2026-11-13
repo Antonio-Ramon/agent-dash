@@ -4,6 +4,15 @@ use chrono::{DateTime, Local, NaiveDate};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// Nome do agente do Claude Code nos totais de uso (os outros usam o nome
+/// de `agents.rs`, ex.: "Antigravity").
+pub const CLAUDE: &str = "Claude";
+
+/// Ordem de exibição dos agentes nos totais: Claude, depois os demais por nome.
+pub fn agent_order(a: &str, b: &str) -> std::cmp::Ordering {
+    (a != CLAUDE).cmp(&(b != CLAUDE)).then_with(|| a.cmp(b))
+}
+
 /// Contagem de tokens de uma ou mais respostas da API.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Tokens {
@@ -146,6 +155,9 @@ pub struct SessionInfo {
     pub status: String,
     /// interactive | background | …
     pub kind: String,
+    /// Agente da sessão quando não é o Claude Code (ex.: "Antigravity").
+    /// Nessas sessões não há tokens, subagentes nem tasks.
+    pub agent: Option<String>,
     /// Id curto de sessão em background (`claude agents`), para stop/attach/rm.
     pub bg_id: Option<String>,
     /// Sessão em background parada esperando resposta: a pergunta dela.
@@ -173,11 +185,18 @@ pub struct Snapshot {
     pub sessions: Vec<SessionInfo>,
     pub agents: Vec<AgentInfo>,
     pub tasks: Vec<TaskInfo>,
+    /// Uso por dia somando todos os agentes.
     pub daily: BTreeMap<NaiveDate, Tokens>,
-    pub daily_by_model: BTreeMap<NaiveDate, BTreeMap<String, Tokens>>,
-    pub daily_sessions: BTreeMap<NaiveDate, usize>,
+    /// Uso por dia de cada agente ("Claude", "Antigravity"…).
+    pub daily_by_agent: BTreeMap<NaiveDate, BTreeMap<String, Tokens>>,
+    /// Uso por dia de cada modelo, separado por agente (dia -> agente -> modelo).
+    pub daily_by_model: BTreeMap<NaiveDate, BTreeMap<String, BTreeMap<String, Tokens>>>,
+    /// Sessões com consumo no dia, por agente.
+    pub daily_sessions: BTreeMap<NaiveDate, BTreeMap<String, usize>>,
     /// Tokens por minuto na última hora, todas as sessões (60 posições).
     pub per_minute: Vec<u64>,
+    /// O mesmo, separado por agente.
+    pub per_minute_by_agent: BTreeMap<String, Vec<u64>>,
     /// Bytes de histórico já lidos / total.
     pub history_done: u64,
     pub history_total: u64,

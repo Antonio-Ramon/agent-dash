@@ -1,7 +1,7 @@
 //! Renderização (ratatui). Layout no estilo lazygit: painéis numerados à
 //! esquerda, painel principal com abas à direita, atalhos no rodapé.
 
-use crate::app::{App, Panel};
+use crate::app::{App, Panel, EXTERNAL_KIND};
 use crate::i18n::{t, tr};
 use crate::model::*;
 use chrono::{DateTime, Local};
@@ -9,7 +9,7 @@ use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Bar, BarChart, BarGroup, Block, BorderType, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Scrollbar,
+    Block, BorderType, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Scrollbar,
     ScrollbarOrientation, ScrollbarState, Sparkline, Table, Wrap,
 };
 use ratatui::Frame;
@@ -98,6 +98,127 @@ fn spark_text(data: &[u64]) -> String {
         .collect()
 }
 
+/// Cor de cada agente nos totais de uso (barras, cabeçalho e tabela).
+fn agent_color(agent: &str) -> Color {
+    match agent {
+        CLAUDE => Color::Magenta,
+        "Antigravity" => Color::LightBlue,
+        "Codex" => Color::Green,
+        _ => Color::Yellow,
+    }
+}
+
+/// Cor do uso na visão atual: a do agente filtrado ou a do total.
+fn usage_color(app: &App) -> Color {
+    app.usage_filter.as_deref().map_or(Color::Magenta, agent_color)
+}
+
+/// Tokens por minuto da última hora na visão atual (`v`).
+fn per_minute_view(app: &App) -> Vec<u64> {
+    match &app.usage_filter {
+        None => app.snap.per_minute.clone(),
+        Some(a) => app.snap.per_minute_by_agent.get(a).cloned().unwrap_or_else(|| vec![0; 60]),
+    }
+}
+
+/// Partes da barra de um dia: uma por agente (Claude embaixo), ou só a do
+/// agente filtrado.
+fn day_segments(app: &App, day: chrono::NaiveDate) -> Vec<(u64, Color)> {
+    let Some(m) = app.snap.daily_by_agent.get(&day) else { return Vec::new() };
+    let mut v: Vec<(&String, &Tokens)> = m.iter().filter(|(a, t)| app.usage_shows(a) && t.total() > 0).collect();
+    v.sort_by(|a, b| agent_order(a.0, b.0));
+    v.into_iter().map(|(a, t)| (t.total(), agent_color(a))).collect()
+}
+
+/// Legenda dos agentes (`■ Claude ■ Antigravity`), só quando há mais de um.
+fn agent_legend(app: &App) -> Vec<Span<'static>> {
+    let agents = app.usage_agents();
+    if agents.len() < 2 {
+        return Vec::new();
+    }
+    agents
+        .into_iter()
+        .filter(|a| app.usage_shows(a))
+        .flat_map(|a| [Span::styled(" ■ ", Style::new().fg(agent_color(&a))), Span::styled(a, Style::new().fg(DIM))])
+        .collect()
+}
+
+struct StackBar {
+    label: String,
+    segs: Vec<(u64, Color)>,
+    selected: bool,
+}
+
+/// Barras verticais empilhadas (uma cor por parte), com o total escrito no
+/// pé da barra e o rótulo embaixo. A altura é proporcional ao total; parte
+/// que não é zero ganha pelo menos 1/8 de linha para não sumir.
+fn draw_stacked(f: &mut Frame, area: Rect, bars: &[StackBar], bar_w: u16, gap: u16, sel_color: Color) {
+    const EIGHTHS: [&str; 9] = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+    if area.height < 2 || area.width < bar_w {
+        return;
+    }
+    let chart_h = area.height - 1;
+    let h8 = chart_h as u64 * 8;
+    let max = bars.iter().map(|b| b.segs.iter().map(|s| s.0).sum::<u64>()).max().unwrap_or(0).max(1);
+    let buf = f.buffer_mut();
+    for (i, bar) in bars.iter().enumerate() {
+        let x0 = area.x + i as u16 * (bar_w + gap);
+        if x0 + bar_w > area.right() {
+            break;
+        }
+        // Fim (em oitavos de linha, a partir da base) de cada parte.
+        let mut ends: Vec<(u64, Color)> = Vec::new();
+        let mut acc = 0;
+        for &(v, c) in bar.segs.iter().filter(|s| s.0 > 0) {
+            acc = (acc + ((v * h8 + max / 2) / max).max(1)).min(h8);
+            ends.push((acc, c));
+        }
+        let top = acc;
+        let at = |p: u64| ends.iter().find(|(e, _)| *e > p).map(|x| x.1);
+        for r in 0..chart_h as u64 {
+            let (lo, hi) = (r * 8, r * 8 + 8);
+            if top <= lo {
+                break;
+            }
+            let Some(a) = at(lo) else { break };
+            let y = area.y + chart_h - 1 - r as u16;
+            let (sym, fg, bg) = if top >= hi {
+                match at(hi - 1) {
+                    Some(b) if b != a => {
+                        let end_a = ends.iter().find(|(e, _)| *e > lo).map_or(hi, |x| x.0);
+                        (EIGHTHS[(end_a - lo) as usize], a, b)
+                    }
+                    _ => (EIGHTHS[8], a, Color::Reset),
+                }
+            } else {
+                // ponytail: célula do topo com duas partes usa a cor de cima, para a parte
+                // pequena não sumir; a de baixo perde menos de uma linha.
+                (EIGHTHS[(top - lo) as usize], at(top - 1).unwrap_or(a), Color::Reset)
+            };
+            for x in x0..x0 + bar_w {
+                buf[(x, y)].set_symbol(sym).set_fg(fg).set_bg(bg);
+            }
+        }
+        let total: u64 = bar.segs.iter().map(|s| s.0).sum();
+        let center = |s: &str| {
+            let s: String = s.chars().take(bar_w as usize).collect();
+            let pad = (bar_w as usize - s.chars().count()) / 2;
+            (x0 + pad as u16, s)
+        };
+        if total > 0 {
+            let base = if bar.selected { sel_color } else { bar.segs.iter().find(|s| s.0 > 0).map_or(Color::Magenta, |s| s.1) };
+            for x in x0..x0 + bar_w {
+                buf[(x, area.y + chart_h - 1)].set_symbol(" ").set_bg(base);
+            }
+            let (x, s) = center(&fmt_tok(total));
+            buf.set_string(x, area.y + chart_h - 1, s, Style::new().fg(Color::Black).bg(base));
+        }
+        let (x, s) = center(&bar.label);
+        let st = if bar.selected { Style::new().fg(Color::White).bold() } else { Style::new().fg(DIM) };
+        buf.set_string(x, area.bottom() - 1, s, st);
+    }
+}
+
 fn minutes_series(u: &Usage) -> Vec<u64> {
     let now_min = Local::now().timestamp().div_euclid(60);
     (0..60).map(|i| *u.per_minute.get(&(now_min - 59 + i)).unwrap_or(&0)).collect()
@@ -106,6 +227,15 @@ fn minutes_series(u: &Usage) -> Vec<u64> {
 fn session_dot(s: &SessionInfo) -> Span<'static> {
     if s.status == "pendente" {
         return Span::styled("◐", Style::new().fg(Color::Magenta));
+    }
+    // Outros agentes: losango no lugar da bolinha, mesmas cores de status.
+    if s.agent.is_some() {
+        return match (s.alive, s.status.as_str()) {
+            (false, _) => Span::styled("◇", Style::new().fg(DIM)),
+            (true, "busy") => Span::styled("◆", Style::new().fg(Color::Yellow)),
+            (true, "idle") => Span::styled("◆", Style::new().fg(Color::Green)),
+            _ => Span::styled("◆", Style::new().fg(Color::Blue)),
+        };
     }
     if !s.alive {
         return Span::styled("○", Style::new().fg(DIM));
@@ -251,16 +381,18 @@ fn draw_confirm(f: &mut Frame, app: &App) {
 
 fn draw_launcher(f: &mut Frame, app: &App) {
     let Some(form) = &app.launcher else { return };
-    let r = centered(f.area(), 84, 24);
+    let r = centered(f.area(), 84, 25);
     f.render_widget(Clear, r);
     let block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(Style::new().fg(FOCUS))
-        .title(Span::styled(t(" Nova instância do Claude Code ", " New Claude Code instance "), Style::new().fg(FOCUS).bold()))
+        .title(Span::styled(t(" Nova instância ", " New instance "), Style::new().fg(FOCUS).bold()))
         .title_alignment(Alignment::Center);
     let inner = block.inner(r);
     f.render_widget(block, r);
-    let [fields, list, foot] = Layout::vertical([Constraint::Length(6), Constraint::Min(3), Constraint::Length(2)]).areas(inner);
+    let [fields, list, foot] = Layout::vertical([Constraint::Length(7), Constraint::Min(3), Constraint::Length(2)]).areas(inner);
+    use crate::app::{F_AGENT, F_MODE, F_MODEL, F_NAME, F_PROMPT, F_REPO};
+    let def = app.agents.get(form.agent);
 
     let label = |i: usize, name: &str| {
         let st = if form.field == i { Style::new().fg(Color::Black).bg(ACCENT).bold() } else { Style::new().fg(DIM) };
@@ -276,30 +408,59 @@ fn draw_launcher(f: &mut Frame, app: &App) {
         }
         v
     };
-    let mut models = crate::actions::MODELS;
-    models[0] = t("padrão", "default");
-    let mut model = vec![label(1, t("Modelo", "Model"))];
-    model.extend(choice(&models, form.model));
-    let mut mode = vec![label(2, t("Modo", "Mode"))];
-    mode.extend(choice(&[t("aqui no painel", "here in the panel"), t("aba nova do terminal", "new terminal tab"), "background"], form.mode));
+    // Agentes: os que não estão no PATH aparecem riscados.
+    let mut agent = vec![label(F_AGENT, t("Agente", "Agent")), Span::raw(" ")];
+    for (i, a) in app.agents.iter().enumerate() {
+        let missing = form.installed.get(i).is_none_or(|p| p.is_none());
+        let mut st = if i == form.agent { Style::new().fg(Color::Black).bg(Color::Magenta).bold() } else { Style::new().fg(DIM) };
+        if missing {
+            st = st.crossed_out();
+        }
+        agent.push(Span::styled(format!(" {} ", a.name), st));
+        agent.push(Span::raw(" "));
+    }
+    // O primeiro item é sempre "sem flag de modelo".
+    let mut models = def.map(|d| d.model_choices()).unwrap_or_else(|| vec![String::new()]);
+    models[0] = t("padrão", "default").into();
+    let model_refs: Vec<&str> = models.iter().map(String::as_str).collect();
+    let mut model = vec![label(F_MODEL, t("Modelo", "Model"))];
+    // Lista longa (ex.: Antigravity) não cabe na linha: mostra só o escolhido.
+    let avail = fields.width.saturating_sub(15) as usize;
+    let full: usize = model_refs.iter().map(|m| m.chars().count() + 3).sum::<usize>() + 1;
+    if full <= avail {
+        model.extend(choice(&model_refs, form.model));
+    } else {
+        let sel = model_refs.get(form.model).copied().unwrap_or(model_refs[0]);
+        model.extend([
+            Span::raw(" "),
+            Span::styled("◂", Style::new().fg(ACCENT)),
+            Span::styled(format!(" {sel} "), Style::new().fg(Color::Black).bg(Color::Magenta).bold()),
+            Span::styled("▸", Style::new().fg(ACCENT)),
+            Span::styled(tr!("  {}/{} · ←→ troca", "  {}/{} · ←→ switch", form.model + 1, model_refs.len()), Style::new().fg(DIM)),
+        ]);
+    }
+    let modes = [t("aqui no painel", "here in the panel"), t("aba nova do terminal", "new terminal tab"), "background"];
+    let mut mode = vec![label(F_MODE, t("Modo", "Mode"))];
+    mode.extend(choice(&modes[..form.modes(&app.agents)], form.mode));
     let lines = vec![
-        Line::from(vec![label(0, t("Repositório", "Repository")), Span::raw(" "), Span::raw(form.repo.clone()), cursor(0)]),
+        Line::from(vec![label(F_REPO, t("Repositório", "Repository")), Span::raw(" "), Span::raw(form.repo.clone()), cursor(F_REPO)]),
+        Line::from(agent),
         Line::from(model),
         Line::from(mode),
         Line::from(vec![
-            label(3, t("Nome", "Name")),
+            label(F_NAME, t("Nome", "Name")),
             Span::raw(" "),
             Span::raw(form.name.clone()),
-            cursor(3),
-            Span::styled(if form.name.is_empty() && form.field != 3 { t("(opcional)", "(optional)") } else { "" }, Style::new().fg(DIM).italic()),
+            cursor(F_NAME),
+            Span::styled(if form.name.is_empty() && form.field != F_NAME { t("(opcional)", "(optional)") } else { "" }, Style::new().fg(DIM).italic()),
         ]),
         Line::from(vec![
-            label(4, "Prompt"),
+            label(F_PROMPT, "Prompt"),
             Span::raw(" "),
             Span::raw(form.prompt.clone()),
-            cursor(4),
+            cursor(F_PROMPT),
             Span::styled(
-                if form.prompt.is_empty() && form.field != 4 { t("(opcional: primeira mensagem)", "(optional: first message)") } else { "" },
+                if form.prompt.is_empty() && form.field != F_PROMPT { t("(opcional: primeira mensagem)", "(optional: first message)") } else { "" },
                 Style::new().fg(DIM).italic(),
             ),
         ]),
@@ -341,18 +502,34 @@ fn draw_launcher(f: &mut Frame, app: &App) {
         list,
     );
 
-    let spec = crate::actions::LaunchSpec {
-        cwd: String::new(),
-        model: if form.model == 0 { None } else { Some(crate::actions::MODELS[form.model].to_string()) },
-        name: Some(form.name.clone()),
-        prompt: Some(form.prompt.clone()),
-        background: form.mode == 2,
+    let model = models.get(form.model).cloned().filter(|_| form.model > 0);
+    let cmd = match def {
+        Some(d) if !d.is_claude() => {
+            format!("{} {}", d.command, d.launch_args(model.as_deref(), Some(&form.prompt)).join(" "))
+        }
+        _ => {
+            let spec = crate::actions::LaunchSpec {
+                cwd: String::new(),
+                model,
+                name: Some(form.name.clone()),
+                prompt: Some(form.prompt.clone()),
+                background: form.mode == 2,
+            };
+            format!("claude {}", crate::actions::launch_args(&spec).join(" "))
+        }
     };
-    let cmd = format!("claude {}", crate::actions::launch_args(&spec).join(" "));
+    let missing = def.filter(|_| form.installed.get(form.agent).is_none_or(|p| p.is_none()));
     let foot_lines = vec![
-        match &form.error {
-            Some(e) => Line::from(Span::styled(format!(" {e}"), Style::new().fg(Color::Red))),
-            None => Line::from(vec![
+        match (&form.error, missing) {
+            (Some(e), _) => Line::from(Span::styled(format!(" {e}"), Style::new().fg(Color::Red))),
+            (None, Some(d)) => Line::from(Span::styled(
+                match &d.install {
+                    Some(i) => tr!(" {} não está instalado · instale com: {i}", " {} is not installed · install with: {i}", d.command),
+                    None => tr!(" {} não está no PATH", " {} is not on the PATH", d.command),
+                },
+                Style::new().fg(Color::Yellow),
+            )),
+            (None, None) => Line::from(vec![
                 Span::styled(t(" em ", " in "), Style::new().fg(DIM)),
                 Span::styled(form.chosen(&app.snap.repos).unwrap_or_else(|| "?".into()), Style::new().fg(Color::White)),
             ]),
@@ -365,12 +542,36 @@ fn draw_launcher(f: &mut Frame, app: &App) {
 fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     let s = &app.snap;
     let alive = s.sessions.iter().filter(|x| x.alive).count();
-    let busy = s.sessions.iter().filter(|x| x.alive && !matches!(x.status.as_str(), "idle" | "blocked")).count();
+    let busy = s.sessions.iter().filter(|x| x.alive && !matches!(x.status.as_str(), "idle" | "blocked" | "aberta")).count();
     let agents = s.agents.iter().filter(|a| a.running).count();
     let shells = s.tasks.iter().filter(|t| t.status == TaskStatus::Running && t.kind == TaskKind::Shell).count();
     let monitors = s.tasks.iter().filter(|t| t.status == TaskStatus::Running && t.kind == TaskKind::Monitor).count();
     let today = Local::now().date_naive();
-    let today_tok = s.daily.get(&today).map(|t| t.total()).unwrap_or(0);
+    // Uso de hoje separado por agente (só o total quando só o Claude foi usado).
+    let mut today_agents: Vec<(String, u64)> = s
+        .daily_by_agent
+        .get(&today)
+        .map(|m| m.iter().filter(|(a, t)| t.total() > 0 && app.usage_shows(a)).map(|(a, t)| (a.clone(), t.total())).collect())
+        .unwrap_or_default();
+    today_agents.sort_by(|a, b| agent_order(&a.0, &b.0));
+    let per_agent = app.usage_agents().len() > 1 || app.usage_filter.is_some();
+    let mut today_spans = Vec::new();
+    if let (Some(a), true) = (&app.usage_filter, today_agents.is_empty()) {
+        today_spans.push(Span::styled(format!("{a} "), Style::new().fg(agent_color(a))));
+        today_spans.push(Span::styled("0", Style::new().fg(agent_color(a)).bold()));
+    } else if !per_agent || today_agents.is_empty() {
+        let tot: u64 = today_agents.iter().map(|x| x.1).sum();
+        today_spans.push(Span::styled(fmt_tok(tot), Style::new().fg(usage_color(app)).bold()));
+    } else {
+        for (i, (a, n)) in today_agents.iter().enumerate() {
+            if i > 0 {
+                today_spans.push(Span::styled(" · ", Style::new().fg(DIM)));
+            }
+            today_spans.push(Span::styled(format!("{a} "), Style::new().fg(agent_color(a))));
+            today_spans.push(Span::styled(fmt_tok(*n), Style::new().fg(agent_color(a)).bold()));
+        }
+    }
+    let pm = per_minute_view(app);
     let sep = Span::styled(" │ ", Style::new().fg(DIM));
     let mut spans = vec![
         Span::styled(" agent-dash ", Style::new().fg(Color::Black).bg(FOCUS).bold()),
@@ -388,10 +589,10 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
         Span::raw(" monitors"),
         sep.clone(),
         Span::raw(t("hoje ", "today ")),
-        Span::styled(fmt_tok(today_tok), Style::new().fg(Color::Magenta).bold()),
-        Span::raw(" tok "),
-        Span::styled(spark_text(&s.per_minute[s.per_minute.len().saturating_sub(30)..]), Style::new().fg(Color::Magenta)),
     ];
+    spans.extend(today_spans);
+    spans.push(Span::raw(" tok "));
+    spans.push(Span::styled(spark_text(&pm[pm.len().saturating_sub(30)..]), Style::new().fg(usage_color(app))));
     if !s.loaded {
         spans.push(sep.clone());
         spans.push(Span::styled(t("carregando…", "loading…"), Style::new().fg(Color::Yellow)));
@@ -443,11 +644,15 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let (new, clean, folder, copy) = (t("nova", "new"), t("limpar", "clear"), t("pasta", "folder"), t("copiar", "copy"));
+    let view = match &app.usage_filter {
+        None => t("agente: todos", "agent: all").to_string(),
+        Some(a) => tr!("agente: {a}", "agent: {a}"),
+    };
     let ctx: &[(&str, &str)] = match app.focus {
         Panel::Sessions => &[("Enter", "chat"), ("n", new), ("o", t("aba nova", "new tab")), ("x", t("encerrar", "end")), ("d", clean), ("e", folder), ("c", copy)],
         Panel::Agents => &[("n", new), ("d/D", clean), ("e", folder), ("c", t("copiar id", "copy id"))],
         Panel::Tasks => &[("x", t("parar", "stop")), ("d/D", clean), ("o", t("saída", "output")), ("c", t("caminho", "path")), ("J/K", t("rolar", "scroll"))],
-        Panel::Usage => &[("n", new), ("c", copy)],
+        Panel::Usage => &[("n", new), ("c", copy), ("v", view.as_str())],
     };
     let common: &[(&str, &str)] = &[
         ("1-4", t("painel", "panel")),
@@ -546,7 +751,14 @@ fn draw_sessions(f: &mut Frame, area: Rect, app: &mut App) {
                 Span::raw(" "),
                 Span::styled(fit(&s.name, name_w), if s.alive { Style::new() } else { Style::new().fg(DIM) }),
                 Span::styled(format!(" {:<7}", fit(status_label(s), 7)), Style::new().fg(DIM)),
-                Span::styled(format!("{:>7}", fmt_tok(s.usage.tokens.total() + s.agents_usage.total())), Style::new().fg(Color::Magenta)),
+                Span::styled(
+                    // Agente cujos tokens o dashboard não lê (ou ainda sem resposta): "—".
+                    format!(
+                        "{:>7}",
+                        if s.agent.is_some() && s.usage.turns == 0 { "—".into() } else { fmt_tok(s.usage.tokens.total() + s.agents_usage.total()) }
+                    ),
+                    Style::new().fg(Color::Magenta),
+                ),
                 Span::styled(format!(" {:>5}", fmt_ago(s.usage.last_ts.or(s.started_at))), Style::new().fg(DIM)),
                 Span::styled(extra, Style::new().fg(Color::Yellow)),
             ]))
@@ -630,14 +842,19 @@ fn draw_tasks(f: &mut Frame, area: Rect, app: &mut App) {
 fn draw_days(f: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.focus == Panel::Usage;
     let days = app.days(); // mais recente primeiro
-    let block = panel_block(t("[4] Uso por dia", "[4] Daily usage").to_string(), focused);
+    let title = match &app.usage_filter {
+        None => t("[4] Uso por dia", "[4] Daily usage").to_string(),
+        Some(a) => tr!("[4] Uso por dia · {a}", "[4] Daily usage · {a}"),
+    };
+    let block = panel_block(title, focused);
     let inner = block.inner(area);
+    f.render_widget(block, area);
     let bar_w: u16 = 6;
     let n = ((inner.width + 1) / (bar_w + 1)).max(1) as usize;
     // Janela de dias que mantém o selecionado visível; mais antigo à esquerda.
     let sel = app.states[3].selected().unwrap_or(0);
     let start = (sel + 1).saturating_sub(n);
-    let bars: Vec<Bar> = days
+    let bars: Vec<StackBar> = days
         .iter()
         .enumerate()
         .skip(start)
@@ -645,22 +862,9 @@ fn draw_days(f: &mut Frame, area: Rect, app: &mut App) {
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
-        .map(|(i, (d, t))| {
-            let on = i == sel;
-            let color = if on && focused { Color::Yellow } else if on { Color::LightMagenta } else { Color::Magenta };
-            Bar::default()
-                .value(t.total())
-                .text_value(fmt_tok(t.total()))
-                .label(Line::from(Span::styled(
-                    d.format("%d/%m").to_string(),
-                    if on { Style::new().fg(Color::White).bold() } else { Style::new().fg(DIM) },
-                )))
-                .style(Style::new().fg(color))
-                .value_style(Style::new().fg(Color::Black).bg(color))
-        })
+        .map(|(i, (d, _))| StackBar { label: d.format("%d/%m").to_string(), segs: day_segments(app, *d), selected: i == sel })
         .collect();
-    let bc = BarChart::default().block(block).data(BarGroup::default().bars(&bars)).bar_width(bar_w).bar_gap(1);
-    f.render_widget(bc, area);
+    draw_stacked(f, inner, &bars, bar_w, 1, if focused { Color::Yellow } else { Color::LightMagenta });
 }
 
 // ---------- painel principal ----------
@@ -728,7 +932,17 @@ fn draw_chat(f: &mut Frame, area: Rect, app: &mut App, key: Option<String>) {
             ]);
             Line::from(v)
         }
-        None => Line::from(lab(t(" contexto e tokens aparecem depois da primeira resposta", " context and tokens show up after the first reply"))),
+        None => match sess.filter(|s| s.agent.is_some()) {
+            Some(s) if s.agent.as_deref() == Some(crate::antigravity::AGENT) => {
+                Line::from(lab(t(" Antigravity · contexto e tokens aparecem depois da primeira resposta", " Antigravity · context and tokens show up after the first reply")))
+            }
+            Some(s) => Line::from(lab(&tr!(
+                " {} · o dashboard ainda não lê os tokens deste agente",
+                " {} · the dashboard does not read this agent's tokens yet",
+                s.agent.as_deref().unwrap_or("agente")
+            ))),
+            None => Line::from(lab(t(" contexto e tokens aparecem depois da primeira resposta", " context and tokens show up after the first reply"))),
+        },
     };
     f.render_widget(line.style(Style::new().bg(Color::Rgb(22, 26, 36))), meter);
     let Some(i) = idx else {
@@ -880,6 +1094,69 @@ fn draw_session_main(f: &mut Frame, area: Rect, app: &mut App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    if let (Some(agent), 0) = (&s.agent, app.tab) {
+        // Outro agente: resumo próprio, sem subagentes nem tasks (Atividade e
+        // Processos usam as abas normais).
+        let in_panel = app.term_idx(&s.session_id).is_some();
+        let status = if s.alive { format!("◆ {}", status_label(&s)) } else { format!("○ {}", t("encerrada", "ended")) };
+        let mut lines = vec![
+            kv(t("Agente", "Agent"), agent.clone()),
+            kv("Status", if s.alive { format!("{status}   pid {}", s.pid.unwrap_or(0)) } else { status }),
+            kv(t("Diretório", "Directory"), s.cwd.clone()),
+        ];
+        if s.kind == EXTERNAL_KIND {
+            lines.push(kv(t("Comando", "Command"), s.title.clone().unwrap_or_default()));
+        } else {
+            let conv = if s.session_id.starts_with(crate::antigravity::NEW_PREFIX) {
+                t("ainda não existe (nasce na primeira mensagem)", "does not exist yet (created by the first message)").to_string()
+            } else {
+                s.session_id.clone()
+            };
+            lines.push(kv(t("Conversa", "Conversation"), conv));
+            lines.push(kv(t("Último prompt", "Last prompt"), s.last_prompt.clone().unwrap_or_else(|| "-".into())));
+            lines.push(kv(t("Atividade", "Activity"), format!("{} ({})", fmt_time(s.usage.last_ts), fmt_ago(s.usage.last_ts))));
+        }
+        lines.push(kv(t("Aberta", "Opened"), fmt_time(s.started_at)));
+        let u = &s.usage;
+        if u.turns > 0 {
+            lines.push(kv(
+                "Tokens",
+                tr!(
+                    "{}  (entrada {} · cache lido {} · saída {})",
+                    "{}  (input {} · cache read {} · output {})",
+                    fmt_tok(u.tokens.total()),
+                    fmt_tok(u.tokens.input),
+                    fmt_tok(u.tokens.cache_read),
+                    fmt_tok(u.tokens.output)
+                ),
+            ));
+            lines.push(kv(t("Contexto atual", "Current context"), fmt_tok(u.last_turn.context())));
+            lines.push(kv(t("Modelo", "Model"), u.model.clone().unwrap_or_else(|| "-".into())));
+            lines.push(kv(t("Respostas", "Replies"), u.turns.to_string()));
+        }
+        lines.push(Line::raw(""));
+        let hint = match (in_panel, s.alive) {
+            (true, _) => t("Roda aqui no painel: Enter entra no chat, F12 volta, x fecha.", "Runs here in the panel: Enter goes into the chat, F12 returns, x closes."),
+            (false, true) => t(
+                "Aberta em outro terminal: x encerra, depois Enter retoma aqui no painel.",
+                "Open in another terminal: x ends it, then Enter resumes it here in the panel.",
+            ),
+            (false, false) => t("Enter retoma aqui no painel, o numa aba nova, c copia o comando.", "Enter resumes here in the panel, o in a new tab, c copies the command."),
+        };
+        let tokens = if u.turns > 0 {
+            t("Subagentes e tasks só existem no Claude Code.", "Subagents and tasks only exist in Claude Code.")
+        } else if agent == crate::antigravity::AGENT {
+            t("Os tokens aparecem depois da primeira resposta do modelo.", "Tokens show up after the model's first reply.")
+        } else {
+            t("O dashboard ainda não lê os tokens deste agente.", "The dashboard does not read this agent's tokens yet.")
+        };
+        for line in [hint, tokens] {
+            lines.push(Line::from(Span::styled(line, Style::new().fg(DIM))));
+        }
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        return;
+    }
+
     match app.tab {
         1 => {
             let lines = event_lines(&s.events, app.scroll);
@@ -890,7 +1167,7 @@ fn draw_session_main(f: &mut Frame, area: Rect, app: &mut App) {
             let header = Row::new(vec!["PID", t("Processo", "Process"), "CPU", "Mem", t("Comando", "Command")]).style(Style::new().fg(DIM));
             let mut rows = vec![Row::new(vec![
                 Cell::from(s.pid.map(|p| p.to_string()).unwrap_or_default()),
-                Cell::from(t("claude (sessão)", "claude (session)")).bold(),
+                Cell::from(tr!("{} (sessão)", "{} (session)", s.agent.as_deref().unwrap_or("claude").to_lowercase())).bold(),
                 Cell::from(format!("{:.1}%", s.cpu)),
                 Cell::from(fmt_mb(s.mem)),
                 Cell::from(""),
@@ -1134,7 +1411,11 @@ fn draw_task_main(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_usage_main(f: &mut Frame, area: Rect, app: &mut App) {
-    let block = main_block(app, t("Consumo de tokens", "Token usage").into());
+    let title = match &app.usage_filter {
+        None => t("Consumo de tokens · todos os agentes", "Token usage · all agents").to_string(),
+        Some(a) => tr!("Consumo de tokens · só {a}", "Token usage · {a} only"),
+    };
+    let block = main_block(app, title);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let [chart, totals, models] =
@@ -1142,46 +1423,41 @@ fn draw_usage_main(f: &mut Frame, area: Rect, app: &mut App) {
 
     let bar_w: u16 = 6;
     let n = ((chart.width.saturating_sub(2)) / (bar_w + 1)).max(1) as usize;
-    let days: Vec<(chrono::NaiveDate, Tokens)> = app.snap.daily.iter().rev().take(n).map(|(d, t)| (*d, *t)).collect();
+    let days: Vec<chrono::NaiveDate> = app.days().into_iter().take(n).map(|(d, _)| d).collect();
     let sel = app.selected_day().map(|(d, _)| d);
-    let bars: Vec<Bar> = days
+    let bars: Vec<StackBar> = days
         .iter()
         .rev()
-        .map(|(d, t)| {
-            let st = if Some(*d) == sel { Style::new().fg(Color::Yellow) } else { Style::new().fg(Color::Magenta) };
-            Bar::default()
-                .value(t.total())
-                .text_value(fmt_tok(t.total()))
-                .label(Line::from(d.format("%d/%m").to_string()))
-                .style(st)
-                .value_style(Style::new().fg(Color::Black).bg(if Some(*d) == sel { Color::Yellow } else { Color::Magenta }))
-        })
+        .map(|d| StackBar { label: d.format("%d/%m").to_string(), segs: day_segments(app, *d), selected: Some(*d) == sel })
         .collect();
-    let bc = BarChart::default()
-        .block(Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(DIM)).title(t(" Tokens por dia ", " Tokens per day ")))
-        .data(BarGroup::default().bars(&bars))
-        .bar_width(bar_w)
-        .bar_gap(1);
-    f.render_widget(bc, chart);
+    let mut title = vec![Span::raw(t(" Tokens por dia ", " Tokens per day "))];
+    title.extend(agent_legend(app));
+    if title.len() > 1 {
+        title.push(Span::raw(" "));
+    }
+    let chart_block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(DIM)).title(Line::from(title));
+    let chart_inner = chart_block.inner(chart);
+    f.render_widget(chart_block, chart);
+    draw_stacked(f, chart_inner, &bars, bar_w, 1, Color::Yellow);
 
     let today = Local::now().date_naive();
-    let sum_days = |k: i64| -> u64 {
-        app.snap.daily.iter().filter(|(d, _)| (today - **d).num_days() < k).map(|(_, t)| t.total()).sum()
-    };
+    let all_days = app.days();
+    let sum_days = |k: i64| -> u64 { all_days.iter().filter(|(d, _)| (today - *d).num_days() < k).map(|(_, t)| t.total()).sum() };
+    let c = usage_color(app);
     let line = Line::from(vec![
         Span::styled(t(" Hoje ", " Today "), Style::new().fg(DIM)),
-        Span::styled(fmt_tok(sum_days(1)), Style::new().fg(Color::Magenta).bold()),
+        Span::styled(fmt_tok(sum_days(1)), Style::new().fg(c).bold()),
         Span::styled(t("   7 dias ", "   7 days "), Style::new().fg(DIM)),
-        Span::styled(fmt_tok(sum_days(7)), Style::new().fg(Color::Magenta).bold()),
+        Span::styled(fmt_tok(sum_days(7)), Style::new().fg(c).bold()),
         Span::styled(t("   30 dias ", "   30 days "), Style::new().fg(DIM)),
-        Span::styled(fmt_tok(sum_days(30)), Style::new().fg(Color::Magenta).bold()),
+        Span::styled(fmt_tok(sum_days(30)), Style::new().fg(c).bold()),
         Span::styled(t("   desde o início ", "   all time "), Style::new().fg(DIM)),
-        Span::styled(fmt_tok(sum_days(i64::MAX)), Style::new().fg(Color::Magenta).bold()),
+        Span::styled(fmt_tok(sum_days(i64::MAX)), Style::new().fg(c).bold()),
     ]);
     let note = Line::from(Span::styled(
         t(
-            " total = entrada + cache escrita + cache leitura + saída (respostas deduplicadas por id)",
-            " total = input + cache write + cache read + output (replies deduplicated by id)",
+            " total = entrada + cache escrita + cache leitura + saída (respostas deduplicadas por id) · v troca o agente",
+            " total = input + cache write + cache read + output (replies deduplicated by id) · v switches the agent",
         ),
         Style::new().fg(DIM).italic(),
     ));
@@ -1190,19 +1466,42 @@ fn draw_usage_main(f: &mut Frame, area: Rect, app: &mut App) {
     let Some((day, dt)) = app.selected_day() else { return };
     let header = Row::new(vec![t("Modelo", "Model"), t("Entrada", "Input"), t("Cache esc.", "Cache wr."), t("Cache leit.", "Cache rd."), t("Saída", "Output"), "Total"])
         .style(Style::new().fg(DIM));
+    let tok_row = |name: Cell<'static>, t: &Tokens, total_color: Color| {
+        Row::new(vec![
+            name,
+            Cell::from(fmt_tok(t.input)),
+            Cell::from(fmt_tok(t.cache_write)),
+            Cell::from(fmt_tok(t.cache_read)),
+            Cell::from(fmt_tok(t.output)),
+            Cell::from(fmt_tok(t.total())).fg(total_color),
+        ])
+    };
     let mut rows: Vec<Row> = Vec::new();
-    if let Some(mm) = app.snap.daily_by_model.get(&day) {
-        let mut v: Vec<(&String, &Tokens)> = mm.iter().filter(|(_, t)| t.total() > 0).collect();
+    // Modelos agrupados por agente, com o subtotal de cada um quando há mais de um.
+    let mut agents: Vec<(&String, &Tokens)> = app
+        .snap
+        .daily_by_agent
+        .get(&day)
+        .map(|m| m.iter().filter(|(a, t)| app.usage_shows(a) && t.total() > 0).collect())
+        .unwrap_or_default();
+    agents.sort_by(|a, b| agent_order(a.0, b.0));
+    let grouped = agents.len() > 1;
+    for (agent, at) in &agents {
+        let color = agent_color(agent);
+        if grouped {
+            rows.push(tok_row(Cell::from(agent.to_string()).fg(color).bold(), at, color).bold());
+        }
+        let mut v: Vec<(&String, &Tokens)> = app
+            .snap
+            .daily_by_model
+            .get(&day)
+            .and_then(|a| a.get(agent.as_str()))
+            .map(|mm| mm.iter().filter(|(_, t)| t.total() > 0).collect())
+            .unwrap_or_default();
         v.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
         for (m, t) in v {
-            rows.push(Row::new(vec![
-                Cell::from(m.clone()),
-                Cell::from(fmt_tok(t.input)),
-                Cell::from(fmt_tok(t.cache_write)),
-                Cell::from(fmt_tok(t.cache_read)),
-                Cell::from(fmt_tok(t.output)),
-                Cell::from(fmt_tok(t.total())).fg(Color::Magenta),
-            ]));
+            let name = if grouped { format!("  {m}") } else { m.clone() };
+            rows.push(tok_row(Cell::from(name), t, color));
         }
     }
     rows.push(
@@ -1216,7 +1515,8 @@ fn draw_usage_main(f: &mut Frame, area: Rect, app: &mut App) {
         ])
         .bold(),
     );
-    let sessions = app.snap.daily_sessions.get(&day).copied().unwrap_or(0);
+    let sessions: usize =
+        app.snap.daily_sessions.get(&day).map_or(0, |m| m.iter().filter(|(a, _)| app.usage_shows(a)).map(|(_, n)| *n).sum());
     let t = Table::new(
         rows,
         [
@@ -1268,9 +1568,16 @@ fn draw_help(f: &mut Frame) {
         sec(t("Filtros", "Filters")),
         k("a", t("mostrar tudo das últimas 24h (inclui encerrados)", "show everything from the last 24h (including ended)")),
         k("f", t("agentes/tasks só da sessão selecionada", "agents/tasks of the selected session only")),
+        k("v", t("uso de tokens: todos os agentes ou um só (cabeçalho, barras e tabela)", "token usage: all agents or just one (header, bars and table)")),
         Line::raw(""),
         sec(t("Ações", "Actions")),
-        k("n", t("nova instância (aqui no painel, aba nova ou background)", "new instance (here in the panel, new tab or background)")),
+        k(
+            "n",
+            t(
+                "nova instância: Claude, Antigravity, Codex… (aqui no painel, aba nova ou background)",
+                "new instance: Claude, Antigravity, Codex… (here in the panel, new tab or background)",
+            ),
+        ),
         k("o", t("sessão: retomar/attach numa aba nova · task: abrir saída", "session: resume/attach in a new tab · task: open output")),
         k("x", t("parar shell/monitor · encerrar sessão (confirma)", "stop shell/monitor · end session (asks first)")),
         k("d  D", t("limpar item terminado / todos do painel", "clear finished item / all in the panel")),
@@ -1291,6 +1598,12 @@ fn draw_help(f: &mut Frame) {
             dot("◐ ", Color::Magenta),
             Span::raw(t("espera  ", "waiting  ")),
             dot("○ ", DIM),
+            Span::raw(t("encerrada", "ended")),
+        ]),
+        Line::from(vec![
+            dot("  ◆ ", Color::Green),
+            Span::raw(t("sessão de outro agente (Antigravity, Codex…), mesmas cores  ", "session of another agent (Antigravity, Codex…), same colors  ")),
+            dot("◇ ", DIM),
             Span::raw(t("encerrada", "ended")),
         ]),
         Line::from(vec![
@@ -1326,4 +1639,20 @@ fn draw_help(f: &mut Frame) {
         ),
         r,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parte_pequena_no_topo_nao_some() {
+        let bar = |segs: Vec<(u64, Color)>| StackBar { label: String::new(), segs, selected: false };
+        // A segunda barra termina em 13/8 (Claude) + 1/8 (outro agente): as duas no mesmo topo.
+        let bars = [bar(vec![(24, Color::Magenta)]), bar(vec![(13, Color::Magenta), (1, Color::Cyan)])];
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(10, 4)).unwrap();
+        term.draw(|f| draw_stacked(f, f.area(), &bars, 3, 1, Color::Yellow)).unwrap();
+        let cell = &term.backend().buffer()[(4, 1)];
+        assert_eq!((cell.symbol(), cell.fg), ("▆", Color::Cyan));
+    }
 }

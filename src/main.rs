@@ -1,9 +1,12 @@
 mod actions;
+mod agents;
+mod antigravity;
 mod app;
 mod collector;
 mod i18n;
 mod model;
 mod scan;
+mod sqlite;
 mod term;
 mod ui;
 mod update;
@@ -160,12 +163,18 @@ fn frame(size: &str) -> anyhow::Result<()> {
         ("tasks (aba saída)", vec![KeyCode::Char('3')]),
         ("tasks (detalhes)", vec![KeyCode::Char(']')]),
         ("uso", vec![KeyCode::Char('4')]),
+        ("uso de ontem", vec![KeyCode::Char('j')]),
+        ("uso só de um agente", vec![KeyCode::Char('v'), KeyCode::Char('v')]),
+        ("uso de volta a todos", vec![KeyCode::Char('v')]),
         ("agentes (tudo)", vec![KeyCode::Char('2'), KeyCode::Char('a')]),
         ("sessão > processos", vec![KeyCode::Char('1'), KeyCode::Char(']'), KeyCode::Char(']')]),
         ("ajuda", vec![KeyCode::Char('?')]),
-        ("nova instância", vec![KeyCode::Esc, KeyCode::Char('['), KeyCode::Char('n'), KeyCode::Tab, KeyCode::Right, KeyCode::Tab, KeyCode::Tab, KeyCode::Char('t'), KeyCode::Char('e'), KeyCode::Char('s'), KeyCode::Char('t'), KeyCode::Char('e')]),
+        // Segundo agente da lista (Antigravity), primeiro modelo, prompt "teste".
+        ("nova instância", vec![KeyCode::Esc, KeyCode::Char('['), KeyCode::Char('n'), KeyCode::Tab, KeyCode::Right, KeyCode::Tab, KeyCode::Right, KeyCode::Tab, KeyCode::Tab, KeyCode::Tab, KeyCode::Char('t'), KeyCode::Char('e'), KeyCode::Char('s'), KeyCode::Char('t'), KeyCode::Char('e')]),
         ("confirmar encerrar", vec![KeyCode::Esc, KeyCode::Char('x')]),
         ("aba chat", vec![KeyCode::Esc, KeyCode::Char(']'), KeyCode::Char(']')]),
+        // Segunda sessão da lista (com um Antigravity aberto, costuma ser ele).
+        ("segunda sessão", vec![KeyCode::Esc, KeyCode::Char('1'), KeyCode::Char('g'), KeyCode::Char('j')]),
     ];
     // Mouse sintético: a roda sobre Sessões rola a lista sem mexer na seleção;
     // o clique dá foco e seleciona a linha clicada.
@@ -514,7 +523,13 @@ fn dump() -> anyhow::Result<()> {
     }
     println!("\n== Últimos 10 dias");
     for (d, t) in snap.daily.iter().rev().take(10) {
-        println!("{d}  total={:<14} out={:<10} sessões={}", t.total(), t.output, snap.daily_sessions.get(d).unwrap_or(&0));
+        let sessions: usize = snap.daily_sessions.get(d).map_or(0, |m| m.values().sum());
+        let by_agent: Vec<String> = snap
+            .daily_by_agent
+            .get(d)
+            .map(|m| m.iter().map(|(a, t)| format!("{a}={}", t.total())).collect())
+            .unwrap_or_default();
+        println!("{d}  total={:<14} out={:<10} sessões={sessions:<4} {}", t.total(), t.output, by_agent.join(" "));
     }
     Ok(())
 }

@@ -1,4 +1,4 @@
-//! Terminal embutido: roda o `claude` num pseudo-terminal (ConPTY) e mantém
+//! Terminal embutido: roda o `claude` (ou outro agente) num pseudo-terminal (ConPTY) e mantém
 //! a tela dele num emulador VT, para ser desenhada dentro do painel.
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -26,6 +26,11 @@ pub struct Term {
     pub cwd: String,
     /// false = attach numa sessão em background, que segue viva sem o dashboard.
     pub restorable: bool,
+    /// Agente que roda aqui quando não é o Claude Code (ex.: "Antigravity").
+    pub agent: Option<String>,
+    /// Linha de comando usada para abrir (mostrada no resumo da sessão).
+    pub command_line: String,
+    pub started: chrono::DateTime<chrono::Local>,
     pub parser: Arc<Mutex<vt100::Parser>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
@@ -62,7 +67,7 @@ impl Term {
         // não deve se comportar como filho dela (senão não salva a conversa).
         cmd.env_remove("CLAUDE_CODE_CHILD_SESSION");
         cmd.env_remove("CLAUDECODE");
-        let child = pair.slave.spawn_command(cmd).map_err(|e| crate::i18n::tr!("não consegui iniciar o claude: {e}", "could not start claude: {e}"))?;
+        let child = pair.slave.spawn_command(cmd).map_err(|e| crate::i18n::tr!("não consegui iniciar {program}: {e}", "could not start {program}: {e}"))?;
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| e.to_string())?));
@@ -97,7 +102,23 @@ impl Term {
                 }
             }
         });
-        Ok(Term { key, title, cwd: cwd.to_string(), restorable: true, parser, writer, master: pair.master, child, rows, cols, scroll: 0 })
+        let command_line = std::iter::once(program.to_string()).chain(args.iter().cloned()).collect::<Vec<_>>().join(" ");
+        Ok(Term {
+            key,
+            title,
+            cwd: cwd.to_string(),
+            restorable: true,
+            agent: None,
+            command_line,
+            started: chrono::Local::now(),
+            parser,
+            writer,
+            master: pair.master,
+            child,
+            rows,
+            cols,
+            scroll: 0,
+        })
     }
 
     pub fn send(&mut self, bytes: &[u8]) {

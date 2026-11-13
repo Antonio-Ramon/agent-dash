@@ -1,6 +1,7 @@
 //! Estado da UI e tratamento de teclas.
 
-use crate::actions::{Action, LaunchSpec, MODELS};
+use crate::actions::{Action, LaunchSpec};
+use crate::agents::{self, AgentDef};
 use crate::collector::Ctl;
 use crate::i18n::{t, tr};
 use crate::model::*;
@@ -69,7 +70,13 @@ pub struct Confirm {
     pub hide: Vec<String>,
     /// Chats a reabrir se confirmado (pergunta feita ao abrir o dashboard).
     pub restore: Vec<SavedChat>,
+    /// Chat embutido de outro agente a fechar se confirmado.
+    pub kill_chat: Option<String>,
 }
+
+/// `kind` das sessões de outros agentes (Antigravity, Codex…) que rodam nos chats
+/// embutidos. Elas não vêm do `~/.claude`: são montadas a partir dos chats.
+pub const EXTERNAL_KIND: &str = "externo";
 
 /// Chat embutido que estava aberto; fica em disco enquanto o chat existir,
 /// para ser oferecido de volta se o dashboard fechar com ele aberto.
@@ -78,23 +85,43 @@ pub struct SavedChat {
     pub session_id: String,
     pub title: String,
     pub cwd: String,
+    /// Agente da conversa quando não é o Claude (ex.: "Antigravity").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 /// Formulário "nova instância".
 pub struct LaunchForm {
-    /// 0 repositório · 1 modelo · 2 modo · 3 nome · 4 prompt inicial
+    /// Ver as constantes `F_*`.
     pub field: usize,
     pub repo: String,
     pub sug: usize,
+    /// Índice em `App::agents` (0 = Claude).
+    pub agent: usize,
+    /// Onde cada agente está instalado (None = não achei no PATH).
+    pub installed: Vec<Option<PathBuf>>,
     pub model: usize,
-    /// 0 aqui no painel · 1 aba nova do terminal · 2 background
+    /// 0 aqui no painel · 1 aba nova do terminal · 2 background (só Claude)
     pub mode: usize,
     pub name: String,
     pub prompt: String,
     pub error: Option<String>,
 }
 
-pub const LAUNCH_FIELDS: usize = 5;
+pub const F_REPO: usize = 0;
+pub const F_AGENT: usize = 1;
+pub const F_MODEL: usize = 2;
+pub const F_MODE: usize = 3;
+pub const F_NAME: usize = 4;
+pub const F_PROMPT: usize = 5;
+pub const LAUNCH_FIELDS: usize = 6;
+
+impl LaunchForm {
+    /// Quantos modos de abrir valem para o agente (o background só existe no Claude Code).
+    pub fn modes(&self, agents: &[AgentDef]) -> usize {
+        if agents.get(self.agent).is_some_and(|a| a.is_claude()) { 3 } else { 2 }
+    }
+}
 
 /// Seleção de texto feita com o mouse no chat embutido. Pontos em
 /// (linha, coluna) como em `term::text_between`.
@@ -153,6 +180,8 @@ pub struct App {
     pub show_all: bool,
     /// `f`: agentes/tasks só da sessão selecionada.
     pub only_selected: bool,
+    /// `v`: uso de tokens de um agente só (`None` = todos somados).
+    pub usage_filter: Option<String>,
     pub zoom: bool,
     pub help: bool,
     pub tab: usize,
@@ -175,14 +204,28 @@ pub struct App {
     /// Itens limpos da lista (`d`/`D`); voltam com `a` ou `u`.
     hidden: HashSet<String>,
     last_hidden: Vec<String>,
+    /// Agentes que dá para abrir pelo `n` (o Claude primeiro).
+    pub agents: Vec<AgentDef>,
+}
+
+/// Pasta do estado local (itens ocultos, chats abertos). Nos testes é uma
+/// pasta temporária, para não mexer no estado de quem roda `cargo test`.
+fn state_dir() -> Option<PathBuf> {
+    if cfg!(test) {
+        // Uma pasta por teste (cada teste roda numa thread): testes em paralelo
+        // não apagam o estado uns dos outros.
+        let thread = format!("{:?}", std::thread::current().id()).replace(|c: char| !c.is_ascii_alphanumeric(), "");
+        return Some(std::env::temp_dir().join(format!("agent-dash-teste-estado-{}-{thread}", std::process::id())));
+    }
+    dirs::data_local_dir().map(|d| d.join("agent-dash"))
 }
 
 fn hidden_path() -> Option<PathBuf> {
-    dirs::data_local_dir().map(|d| d.join("agent-dash").join("hidden.json"))
+    state_dir().map(|d| d.join("hidden.json"))
 }
 
 fn open_chats_path() -> Option<PathBuf> {
-    dirs::data_local_dir().map(|d| d.join("agent-dash").join("open_chats.json"))
+    state_dir().map(|d| d.join("open_chats.json"))
 }
 
 fn load_hidden() -> HashSet<String> {
@@ -204,6 +247,7 @@ fn ansi_re() -> &'static Regex {
 
 impl App {
     pub fn new() -> Self {
+        let (agents, agents_err) = agents::load();
         Self {
             snap: Snapshot::default(),
             focus: Panel::Sessions,
@@ -219,11 +263,12 @@ impl App {
             chat_sel: None,
             show_all: false,
             only_selected: false,
+            usage_filter: None,
             zoom: false,
             help: false,
             tab: 0,
             scroll: 0,
-            status: None,
+            status: agents_err.map(|e| (e, Instant::now())),
             quit: false,
             tail: None,
             confirm: None,
@@ -235,6 +280,7 @@ impl App {
             chat_size: (30, 100),
             hidden: load_hidden(),
             last_hidden: Vec::new(),
+            agents,
         }
     }
 
@@ -247,7 +293,7 @@ impl App {
             .terms
             .iter()
             .filter(|t| t.restorable)
-            .map(|t| SavedChat { session_id: t.key.clone(), title: t.title.clone(), cwd: t.cwd.clone() })
+            .map(|t| SavedChat { session_id: t.key.clone(), title: t.title.clone(), cwd: t.cwd.clone(), agent: t.agent.clone() })
             .collect();
         if v.is_empty() {
             let _ = std::fs::remove_file(p);
@@ -283,6 +329,7 @@ impl App {
             quit: false,
             hide: Vec::new(),
             restore: saved,
+            kill_chat: None,
         });
     }
 
@@ -297,7 +344,10 @@ impl App {
                 continue;
             }
             let n = self.terms.len();
-            self.spawn_chat(c.session_id.clone(), c.title.clone(), &c.cwd, &["--resume".to_string(), c.session_id.clone()]);
+            match &c.agent {
+                Some(agent) => self.resume_agent_chat(agent, &c.session_id, c.title.clone(), &c.cwd),
+                None => self.spawn_chat(c.session_id.clone(), c.title.clone(), &c.cwd, &["--resume".to_string(), c.session_id.clone()]),
+            }
             if self.terms.len() == n {
                 failed.push(c.title.clone());
             }
@@ -371,8 +421,40 @@ impl App {
             .collect()
     }
 
+    /// Dias com uso (mais recente primeiro), já com o filtro de agente (`v`).
     pub fn days(&self) -> Vec<(NaiveDate, Tokens)> {
-        self.snap.daily.iter().rev().map(|(d, t)| (*d, *t)).collect()
+        match &self.usage_filter {
+            None => self.snap.daily.iter().rev().map(|(d, t)| (*d, *t)).collect(),
+            Some(a) => self.snap.daily_by_agent.iter().rev().filter_map(|(d, m)| Some((*d, *m.get(a)?))).collect(),
+        }
+    }
+
+    /// Agentes que já tiveram consumo, na ordem de exibição.
+    pub fn usage_agents(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.snap.daily_by_agent.values().flat_map(|m| m.keys().cloned()).collect();
+        v.sort_by(|a, b| agent_order(a, b));
+        v.dedup();
+        v
+    }
+
+    /// `v`: todos -> cada agente -> todos.
+    fn cycle_usage_filter(&mut self) {
+        let agents = self.usage_agents();
+        let next = match &self.usage_filter {
+            None => agents.first().cloned(),
+            Some(cur) => agents.iter().position(|a| a == cur).and_then(|i| agents.get(i + 1)).cloned(),
+        };
+        self.usage_filter = next;
+        self.states[3].select(Some(0));
+        self.flash(match &self.usage_filter {
+            None => t("uso de tokens: todos os agentes", "token usage: all agents").to_string(),
+            Some(a) => tr!("uso de tokens: só {a}", "token usage: {a} only"),
+        });
+    }
+
+    /// Agente passa no filtro de uso (`v`)?
+    pub fn usage_shows(&self, agent: &str) -> bool {
+        self.usage_filter.as_deref().is_none_or(|f| f == agent)
     }
 
     pub fn selected_agent(&self) -> Option<&AgentInfo> {
@@ -434,21 +516,79 @@ impl App {
     pub fn set_snapshot(&mut self, s: Snapshot) {
         self.snap = s;
         self.rekey_terms();
+        self.merge_external();
         self.resync();
+    }
+
+    /// Põe na lista de sessões os chats de outros agentes que o coletor ainda
+    /// não enxerga: um Codex (que o coletor não lê) ou um Antigravity antes da
+    /// primeira mensagem (a conversa só nasce aí). Quando o coletor acha a
+    /// conversa, a entrada daqui sai e fica a dele (ver `rekey_terms`).
+    fn merge_external(&mut self) {
+        self.snap.sessions.retain(|s| s.kind != EXTERNAL_KIND);
+        let known: Vec<(String, Option<u32>)> = self.snap.sessions.iter().map(|s| (s.session_id.clone(), s.pid)).collect();
+        let ext: Vec<SessionInfo> = self
+            .terms
+            .iter()
+            .filter(|t| !known.iter().any(|(id, pid)| *id == t.key || (pid.is_some() && *pid == t.pid())))
+            .filter_map(|t| {
+                let agent = t.agent.clone()?;
+                Some(SessionInfo {
+                    pid: t.pid(),
+                    session_id: t.key.clone(),
+                    name: t.title.clone(),
+                    cwd: t.cwd.clone(),
+                    // O dashboard não sabe se ele está trabalhando ou esperando.
+                    status: "aberta".into(),
+                    kind: EXTERNAL_KIND.into(),
+                    agent: Some(agent),
+                    bg_id: None,
+                    pending: None,
+                    version: String::new(),
+                    started_at: Some(t.started),
+                    alive: true,
+                    title: Some(t.command_line.clone()),
+                    last_prompt: None,
+                    usage: Usage::default(),
+                    agents_usage: Tokens::default(),
+                    events: Vec::new(),
+                    transcript: None,
+                    cpu: 0.0,
+                    mem: 0,
+                    procs: Vec::new(),
+                    agents_total: 0,
+                    agents_running: 0,
+                    tasks_running: 0,
+                })
+            })
+            .collect();
+        self.snap.sessions.splice(0..0, ext);
     }
 
     /// O Claude Code troca o id da sessão em alguns momentos (`/clear`, por
     /// exemplo). O chat embutido é reconhecido pelo PID do processo, e a chave
     /// dele acompanha o id atual; assim ele não vira "sessão de fora".
+    ///
+    /// Vale também para outros agentes: um Antigravity aberto aqui ganha o id
+    /// da conversa quando o coletor a descobre, e daí em diante pode ser
+    /// reaberto como o Claude.
     fn rekey_terms(&mut self) {
         for i in 0..self.terms.len() {
             let Some(pid) = self.terms[i].pid() else { continue };
-            let Some(s) = self.snap.sessions.iter().find(|s| s.alive && s.pid == Some(pid)) else { continue };
+            let agent = self.terms[i].agent.clone();
+            let Some(s) = self.snap.sessions.iter().find(|s| s.alive && s.pid == Some(pid) && s.agent == agent && s.kind != EXTERNAL_KIND) else {
+                continue;
+            };
             if !s.name.is_empty() {
                 self.terms[i].title = s.name.clone();
             }
             if s.session_id == self.terms[i].key {
                 continue;
+            }
+            if let Some(a) = &agent {
+                // Id provisório (`agy-pid-…`) ainda não é uma conversa: não dá para reabrir.
+                let real = !s.session_id.starts_with(crate::antigravity::NEW_PREFIX);
+                self.terms[i].restorable = real && self.agent_def(a).is_some_and(|d| d.resume_flag.is_some());
             }
             let (old, new) = (self.terms[i].key.clone(), s.session_id.clone());
             for slot in [&mut self.chat_key, &mut self.pending_sel, &mut self.sel_keys[0]] {
@@ -560,6 +700,12 @@ impl App {
                         self.quit = true;
                         return;
                     }
+                    if let Some(key) = &c.kill_chat {
+                        // O chat sai da lista no próximo ciclo (reap_terms).
+                        if let Some(i) = self.term_idx(key) {
+                            self.terms[i].kill();
+                        }
+                    }
                     if !c.hide.is_empty() {
                         self.hidden.extend(c.hide.iter().cloned());
                         self.last_hidden = c.hide.clone();
@@ -666,6 +812,7 @@ impl App {
             KeyCode::Char('D') => self.dismiss(true),
             KeyCode::Char('u') => self.undo_dismiss(),
             KeyCode::Char('n') => self.open_launcher(),
+            KeyCode::Char('v') => self.cycle_usage_filter(),
             KeyCode::Char('?') => self.help = true,
             _ => {}
         }
@@ -849,7 +996,17 @@ impl App {
 
     fn copy(&mut self) {
         let text = match self.focus {
-            Panel::Sessions => self.selected_session().map(|s| format!("claude --resume {}", s.session_id)),
+            Panel::Sessions => self.selected_session().map(|s| match &s.agent {
+                // Chat ainda sem conversa conhecida: a linha de comando dele.
+                Some(_) if s.kind == EXTERNAL_KIND => s.title.clone().unwrap_or_default(),
+                // Aberto, mas sem conversa ainda: a pasta, para abrir outro lá.
+                Some(_) if s.session_id.starts_with(crate::antigravity::NEW_PREFIX) => s.cwd.clone(),
+                Some(agent) => self
+                    .agent_def(agent)
+                    .and_then(|d| d.resume_args(&s.session_id).map(|a| format!("{} {}", d.command, a.join(" "))))
+                    .unwrap_or_else(|| s.session_id.clone()),
+                None => format!("claude --resume {}", s.session_id),
+            }),
             Panel::Agents => self.selected_agent().map(|a| a.agent_id.clone()),
             Panel::Tasks => self
                 .selected_task()
@@ -869,8 +1026,28 @@ impl App {
         match self.focus {
             Panel::Sessions => {
                 let Some(s) = self.selected_session().cloned() else { return };
+                if self.is_external(&s.session_id) {
+                    self.flash(tr!("{} roda aqui no painel: Enter entra no chat", "{} runs here in the panel: Enter goes into the chat", s.name));
+                    return;
+                }
                 if s.alive && s.bg_id.is_none() {
                     self.flash(tr!("{} já está aberta em outro terminal (pid {})", "{} is already open in another terminal (pid {})", s.name, s.pid.unwrap_or(0)));
+                    return;
+                }
+                if let Some(agent) = &s.agent {
+                    // Conversa encerrada de outro agente: retoma numa aba nova.
+                    if s.cwd.is_empty() {
+                        self.flash(t("não sei o diretório desta sessão", "this session's directory is unknown"));
+                        return;
+                    }
+                    match self.agent_resume(agent, &s.session_id) {
+                        Ok((prog, args)) => {
+                            let a = Action::OpenAgent { program: prog.to_string_lossy().into(), args, cwd: s.cwd.clone(), title: s.name.clone() };
+                            let _ = ctl.send(Ctl::Act(a));
+                            self.flash(tr!("abrindo {}…", "opening {}…", s.name));
+                        }
+                        Err(e) => self.flash(e),
+                    }
                     return;
                 }
                 if s.cwd.is_empty() {
@@ -927,21 +1104,76 @@ impl App {
     }
 
     fn spawn_chat(&mut self, key: String, title: String, cwd: &str, args: &[String]) {
-        match Term::spawn(key.clone(), title.clone(), cwd, args, self.chat_size.0, self.chat_size.1) {
+        match Term::spawn(key, title, cwd, args, self.chat_size.0, self.chat_size.1) {
             Ok(mut t) => {
                 t.restorable = args.first().map(String::as_str) != Some("attach");
-                self.terms.push(t);
-                self.save_open_chats();
-                self.focus = Panel::Sessions;
-                self.tab = 3;
-                self.sel_keys[0] = Some(key.clone());
-                self.pending_sel = Some(key.clone());
-                self.chat_key = Some(key);
-                self.chat_focus = true;
-                self.resync();
-                self.flash(tr!("chat {title} aberto · F12 volta ao painel", "chat {title} open · F12 returns to the panel"));
+                self.adopt_chat(t);
             }
             Err(e) => self.flash(tr!("falha ao abrir o chat: {e}", "could not open the chat: {e}")),
+        }
+    }
+
+    /// Abre outro agente (Antigravity, Codex…) num chat embutido. `program` é o
+    /// caminho já achado no PATH.
+    /// `conversation`: id da conversa retomada; None = conversa nova, que
+    /// ganha o id certo quando o coletor a descobrir (`rekey_terms`).
+    fn spawn_agent_chat(&mut self, agent: &str, program: &Path, title: String, cwd: &str, args: &[String], conversation: Option<&str>) {
+        let key = match conversation {
+            Some(id) => id.to_string(),
+            None => format!("{}-{}", agent.to_lowercase(), term::new_uuid()),
+        };
+        let prog = program.to_string_lossy();
+        match Term::spawn_program(&prog, key, title, cwd, args, self.chat_size.0, self.chat_size.1) {
+            Ok(mut t) => {
+                // Só dá para reabrir depois de saber o id da conversa.
+                t.restorable = conversation.is_some();
+                t.agent = Some(agent.to_string());
+                let name = Path::new(&*prog).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                t.command_line = std::iter::once(name).chain(args.iter().cloned()).collect::<Vec<_>>().join(" ");
+                self.adopt_chat(t);
+            }
+            Err(e) => self.flash(tr!("falha ao abrir o {agent}: {e}", "failed to open {agent}: {e}")),
+        }
+    }
+
+    /// Passa a mostrar um chat recém-aberto e põe o teclado nele.
+    fn adopt_chat(&mut self, t: Term) {
+        let (key, title) = (t.key.clone(), t.title.clone());
+        self.terms.push(t);
+        self.save_open_chats();
+        self.merge_external();
+        self.focus = Panel::Sessions;
+        self.tab = 3;
+        self.sel_keys[0] = Some(key.clone());
+        self.pending_sel = Some(key.clone());
+        self.chat_key = Some(key);
+        self.chat_focus = true;
+        self.resync();
+        self.flash(tr!("chat {title} aberto · F12 volta ao painel", "chat {title} open · F12 returns to the panel"));
+    }
+
+    fn agent_def(&self, name: &str) -> Option<&AgentDef> {
+        self.agents.iter().find(|a| a.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Chat de outro agente aberto aqui no painel com esta chave.
+    fn is_external(&self, session_id: &str) -> bool {
+        self.terms.iter().any(|t| t.key == session_id && t.agent.is_some())
+    }
+
+    /// Como o agente retoma a conversa `id` (programa achado no PATH + args).
+    fn agent_resume(&self, agent: &str, id: &str) -> Result<(PathBuf, Vec<String>), String> {
+        let def = self.agent_def(agent).ok_or_else(|| tr!("{agent} não está na lista de agentes", "{agent} is not in the agent list"))?;
+        let args = def.resume_args(id).ok_or_else(|| tr!("{agent} não tem como retomar uma conversa pelo id", "{agent} cannot resume a conversation by id"))?;
+        let prog = agents::which(&def.command).ok_or_else(|| tr!("{} não está no PATH", "{} is not on the PATH", def.command))?;
+        Ok((prog, args))
+    }
+
+    /// Retoma aqui no painel uma conversa de outro agente.
+    fn resume_agent_chat(&mut self, agent: &str, id: &str, title: String, cwd: &str) {
+        match self.agent_resume(agent, id) {
+            Ok((prog, args)) => self.spawn_agent_chat(agent, &prog, title, cwd, &args, Some(id)),
+            Err(e) => self.flash(e),
         }
     }
 
@@ -952,6 +1184,21 @@ impl App {
             self.chat_key = Some(s.session_id.clone());
             self.chat_focus = true;
             self.tab = 3;
+            return;
+        }
+        if let Some(agent) = &s.agent {
+            if s.alive {
+                self.flash(tr!(
+                    "{} está aberta em outro terminal (pid {}). Para conversar aqui: x encerra, depois Enter retoma no painel",
+                    "{} is open in another terminal (pid {}). To chat here: x ends it, then Enter resumes it in the panel",
+                    s.name,
+                    s.pid.unwrap_or(0)
+                ));
+            } else if s.cwd.is_empty() {
+                self.flash(t("não sei o diretório desta sessão", "this session's directory is unknown"));
+            } else {
+                self.resume_agent_chat(agent, &s.session_id, s.name.clone(), &s.cwd);
+            }
             return;
         }
         let waiting = s.status == "pendente";
@@ -1046,6 +1293,10 @@ impl App {
                     }
                 }
                 let last = t.last_line();
+                if t.agent.is_some() {
+                    self.merge_external();
+                    self.resync();
+                }
                 let last = if last.is_empty() { String::new() } else { format!(": {last}") };
                 self.flash(tr!("chat {} encerrado{last}", "chat {} ended{last}", t.title));
             } else {
@@ -1060,7 +1311,14 @@ impl App {
             return;
         }
         let n = self.terms.len();
-        let mut body: Vec<String> = self.terms.iter().map(|t| format!("• {}", t.title)).collect();
+        let mut body: Vec<String> = self
+            .terms
+            .iter()
+            .map(|t| match &t.agent {
+                Some(a) => format!("• {} ({a})", t.title),
+                None => format!("• {}", t.title),
+            })
+            .collect();
         body.push(t("Os chats abertos aqui dentro fecham junto com o dashboard.", "The chats open in here close together with the dashboard.").into());
         body.push(
             t(
@@ -1069,6 +1327,15 @@ impl App {
             )
             .into(),
         );
+        if self.terms.iter().any(|t| t.agent.is_some() && !t.restorable) {
+            body.push(
+                t(
+                    "Chats de outro agente que ainda não têm conversa (ou cujo agente não retoma conversas) não são reabertos.",
+                    "Chats of another agent that have no conversation yet (or whose agent cannot resume) are not reopened.",
+                )
+                .into(),
+            );
+        }
         let s = if n == 1 { "" } else { "s" };
         self.confirm = Some(Confirm {
             title: tr!("Sair e fechar {n} chat{s}", "Quit and close {n} chat{s}"),
@@ -1077,13 +1344,22 @@ impl App {
             quit: true,
             hide: Vec::new(),
             restore: Vec::new(),
+            kill_chat: None,
         });
     }
 
     // ---------- ações ----------
 
     fn ask(&mut self, title: impl Into<String>, body: Vec<String>, action: Action) {
-        self.confirm = Some(Confirm { title: title.into(), body, action: Some(action), quit: false, hide: Vec::new(), restore: Vec::new() });
+        self.confirm = Some(Confirm {
+            title: title.into(),
+            body,
+            action: Some(action),
+            quit: false,
+            hide: Vec::new(),
+            restore: Vec::new(),
+            kill_chat: None,
+        });
     }
 
     /// `x`: parar a task / encerrar a sessão selecionada (sempre com confirmação).
@@ -1091,6 +1367,47 @@ impl App {
         match self.focus {
             Panel::Sessions => {
                 let Some(s) = self.selected_session().cloned() else { return };
+                if self.is_external(&s.session_id) {
+                    self.confirm = Some(Confirm {
+                        title: tr!("Fechar o chat {}", "Close the chat {}", s.name),
+                        body: vec![
+                            tr!(
+                                "Finaliza o {} que roda aqui no painel (pid {}).",
+                                "Kills the {} running here in the panel (pid {}).",
+                                s.agent.as_deref().unwrap_or(&s.name),
+                                s.pid.unwrap_or(0)
+                            ),
+                            t(
+                                "O dashboard não guarda a conversa de outros agentes; se o agente salva histórico, ele fica onde o agente guarda.",
+                                "The dashboard does not keep other agents' conversations; if the agent saves history, it stays where the agent keeps it.",
+                            )
+                            .into(),
+                        ],
+                        action: None,
+                        quit: false,
+                        hide: Vec::new(),
+                        restore: Vec::new(),
+                        kill_chat: Some(s.session_id.clone()),
+                    });
+                    return;
+                }
+                if let (Some(agent), true) = (&s.agent, s.alive) {
+                    // Outro agente aberto em outro terminal: encerra o processo dele.
+                    let mut body = vec![
+                        tr!("Finaliza o processo {} ({agent}) e os filhos dele ({} processos).", "Kills process {} ({agent}) and its children ({} processes).", s.pid.unwrap_or(0), s.procs.len()),
+                        t("O que estiver sendo feito agora é interrompido.", "Whatever it is doing right now is interrupted.").into(),
+                        t(
+                            "A conversa fica salva: depois, `a` mostra as encerradas e Enter ou `o` retoma.",
+                            "The conversation stays saved: later, `a` shows the ended ones and Enter or `o` resumes it.",
+                        )
+                        .into(),
+                    ];
+                    if s.status == "busy" {
+                        body.insert(0, t("⚠ A sessão está ocupada neste momento.", "⚠ The session is busy right now.").into());
+                    }
+                    self.ask(tr!("Encerrar a sessão {}", "End the session {}", s.name), body, Action::KillAgent { session_id: s.session_id.clone() });
+                    return;
+                }
                 if s.status == "pendente" {
                     self.flash(tr!(
                         "{} não está rodando: está parada esperando sua resposta. o reabre, d remove",
@@ -1269,10 +1586,15 @@ impl App {
 
     fn open_launcher(&mut self) {
         let repo = self.selected_session().map(|s| s.cwd.clone()).unwrap_or_default();
+        // O Claude está sempre disponível (o dashboard depende dele); os outros
+        // são procurados no PATH a cada vez que o formulário abre.
+        let installed = self.agents.iter().map(|a| if a.is_claude() { Some(PathBuf::from("claude")) } else { agents::which(&a.command) }).collect();
         self.launcher = Some(LaunchForm {
-            field: 0,
+            field: F_REPO,
             repo,
             sug: 0,
+            agent: 0,
+            installed,
             model: 0,
             mode: 0,
             name: String::new(),
@@ -1283,10 +1605,12 @@ impl App {
 
     fn launcher_key(&mut self, k: KeyEvent, ctl: &Sender<Ctl>) {
         let repos = self.snap.repos.clone();
+        let agent_defs = self.agents.clone();
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let Some(f) = self.launcher.as_mut() else { return };
         f.error = None;
         let n_sug = f.suggestions(&repos).len();
+        let cycle = |cur: usize, n: usize, fwd: bool| if n == 0 { 0 } else if fwd { (cur + 1) % n } else { (cur + n - 1) % n };
         match k.code {
             KeyCode::Esc => {
                 self.launcher = None;
@@ -1294,16 +1618,24 @@ impl App {
             }
             KeyCode::Tab => f.field = (f.field + 1) % LAUNCH_FIELDS,
             KeyCode::BackTab => f.field = (f.field + LAUNCH_FIELDS - 1) % LAUNCH_FIELDS,
-            KeyCode::Down if f.field == 0 && n_sug > 0 => f.sug = (f.sug + 1).min(n_sug - 1),
-            KeyCode::Up if f.field == 0 => f.sug = f.sug.saturating_sub(1),
+            KeyCode::Down if f.field == F_REPO && n_sug > 0 => f.sug = (f.sug + 1).min(n_sug - 1),
+            KeyCode::Up if f.field == F_REPO => f.sug = f.sug.saturating_sub(1),
             KeyCode::Down => f.field = (f.field + 1) % LAUNCH_FIELDS,
             KeyCode::Up => f.field = (f.field + LAUNCH_FIELDS - 1) % LAUNCH_FIELDS,
-            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if f.field == 1 || f.field == 2 => {
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if matches!(f.field, F_AGENT | F_MODEL | F_MODE) => {
                 let fwd = !matches!(k.code, KeyCode::Left);
-                if f.field == 1 {
-                    f.model = if fwd { (f.model + 1) % MODELS.len() } else { (f.model + MODELS.len() - 1) % MODELS.len() };
-                } else {
-                    f.mode = if fwd { (f.mode + 1) % 3 } else { (f.mode + 2) % 3 };
+                match f.field {
+                    F_AGENT => {
+                        f.agent = cycle(f.agent, agent_defs.len(), fwd);
+                        // Cada agente tem os seus modelos; e só o Claude roda em background.
+                        f.model = 0;
+                        f.mode = f.mode.min(f.modes(&agent_defs) - 1);
+                    }
+                    F_MODEL => {
+                        let n = agent_defs.get(f.agent).map_or(1, |a| a.model_choices().len());
+                        f.model = cycle(f.model, n, fwd);
+                    }
+                    _ => f.mode = cycle(f.mode, f.modes(&agent_defs), fwd),
                 }
             }
             KeyCode::Char('u') if ctrl => {
@@ -1329,9 +1661,45 @@ impl App {
                     f.error = Some(t("escolha um repositório da lista ou digite um caminho que exista", "pick a repository from the list or type a path that exists").into());
                     return;
                 };
+                let Some(def) = agent_defs.get(f.agent).cloned() else { return };
+                let model = def.model_choices().get(f.model).cloned().filter(|_| f.model > 0);
+                if !def.is_claude() {
+                    let Some(program) = f.installed.get(f.agent).cloned().flatten() else {
+                        f.error = Some(match &def.install {
+                            Some(i) => tr!("{} não está no PATH. Para instalar: {i}", "{} is not on the PATH. To install: {i}", def.command),
+                            None => tr!("{} não está no PATH", "{} is not on the PATH", def.command),
+                        });
+                        return;
+                    };
+                    let prompt = Some(f.prompt.clone()).filter(|p| !p.trim().is_empty());
+                    if prompt.as_deref().is_some_and(|p| agents::unsafe_for_batch(&program, p)) {
+                        f.error = Some(
+                            t(
+                                "o prompt tem \" % & | < > ^, que o atalho .cmd não passa com segurança: abra sem prompt e mande a mensagem no chat",
+                                "the prompt has \" % & | < > ^, which the .cmd shim cannot pass safely: open without a prompt and send the message in the chat",
+                            )
+                            .into(),
+                        );
+                        return;
+                    }
+                    let args = def.launch_args(model.as_deref(), prompt.as_deref());
+                    let title = Some(f.name.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| {
+                        let dir = Path::new(&cwd).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                        format!("{} {dir}", def.name.to_lowercase()).trim().to_string()
+                    });
+                    let in_panel = f.mode == 0;
+                    self.launcher = None;
+                    if in_panel {
+                        self.spawn_agent_chat(&def.name, &program, title, &cwd, &args, None);
+                    } else {
+                        let _ = ctl.send(Ctl::Act(Action::OpenAgent { program: program.to_string_lossy().into(), args, cwd: cwd.clone(), title }));
+                        self.flash(tr!("abrindo {} numa aba nova em {cwd}…", "opening {} in a new tab at {cwd}…", def.name));
+                    }
+                    return;
+                }
                 let spec = LaunchSpec {
                     cwd: cwd.clone(),
-                    model: if f.model == 0 { None } else { Some(MODELS[f.model].to_string()) },
+                    model,
                     name: Some(f.name.clone()).filter(|n| !n.trim().is_empty()),
                     prompt: Some(f.prompt.clone()).filter(|p| !p.trim().is_empty()),
                     background: f.mode == 2,
@@ -1371,9 +1739,9 @@ impl App {
 
 fn text_field(f: &mut LaunchForm) -> Option<&mut String> {
     match f.field {
-        0 => Some(&mut f.repo),
-        3 => Some(&mut f.name),
-        4 => Some(&mut f.prompt),
+        F_REPO => Some(&mut f.repo),
+        F_NAME => Some(&mut f.name),
+        F_PROMPT => Some(&mut f.prompt),
         _ => None,
     }
 }
@@ -1473,4 +1841,305 @@ pub fn set_clipboard(text: &str) -> std::io::Result<()> {
 #[cfg(not(windows))]
 pub fn set_clipboard(_text: &str) -> std::io::Result<()> {
     Err(std::io::Error::new(std::io::ErrorKind::Unsupported, t("área de transferência só no Windows", "clipboard is Windows-only")))
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn key(app: &mut App, code: KeyCode, ctl: &Sender<Ctl>) {
+        app.on_key(KeyEvent::new(code, KeyModifiers::NONE), ctl);
+    }
+
+    /// Fluxo completo com um agente falso (um `.cmd`, como os atalhos que o npm
+    /// instala): abre pelo formulário `n`, o chat mostra o que ele imprime, a
+    /// sessão entra na lista, e `x` + `y` fecha.
+    #[test]
+    fn agente_externo_abre_aparece_e_fecha() {
+        let dir = std::env::temp_dir().join(format!("agent-dash-agente-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("agentefalso.cmd");
+        std::fs::write(&fake, "@echo off\r\necho AGENTE-FALSO %*\r\npause >nul\r\n").unwrap();
+
+        let (ctl, _rx) = mpsc::channel();
+        let mut app = App::new();
+        app.agents.push(AgentDef {
+            name: "Falso".into(),
+            command: fake.display().to_string(),
+            args: vec!["--fixo".into()],
+            models: vec!["m1".into()],
+            model_flag: Some("--model".into()),
+            prompt_flag: Some("--prompt".into()),
+            install: None,
+            resume_flag: None,
+        });
+        let n_agents = app.agents.len();
+
+        key(&mut app, KeyCode::Char('n'), &ctl);
+        app.launcher.as_mut().unwrap().repo = dir.display().to_string();
+        key(&mut app, KeyCode::Tab, &ctl); // Agente
+        for _ in 0..n_agents - 1 {
+            key(&mut app, KeyCode::Right, &ctl);
+        }
+        assert_eq!(app.launcher.as_ref().unwrap().agent, n_agents - 1);
+        key(&mut app, KeyCode::Tab, &ctl); // Modelo
+        key(&mut app, KeyCode::Right, &ctl); // m1
+        key(&mut app, KeyCode::Tab, &ctl); // Modo (aqui no painel)
+        key(&mut app, KeyCode::Right, &ctl);
+        key(&mut app, KeyCode::Right, &ctl); // só 2 modos: volta para "aqui no painel"
+        assert_eq!(app.launcher.as_ref().unwrap().mode, 0);
+        key(&mut app, KeyCode::Tab, &ctl); // Nome
+        key(&mut app, KeyCode::Tab, &ctl); // Prompt
+        for c in "oi".chars() {
+            key(&mut app, KeyCode::Char(c), &ctl);
+        }
+        key(&mut app, KeyCode::Enter, &ctl);
+        assert!(app.launcher.is_none(), "erro no formulário: {:?}", app.status);
+        assert_eq!(app.terms.len(), 1, "chat não abriu: {:?}", app.status);
+        assert!(app.chat_focus);
+
+        // O agente imprime os argumentos que recebeu.
+        let t0 = Instant::now();
+        while !app.terms[0].contents().contains("AGENTE-FALSO") && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let screen = app.terms[0].contents();
+        assert!(screen.contains("AGENTE-FALSO --fixo --model m1 --prompt oi"), "tela: {screen}");
+
+        // Aparece na lista de sessões, mesmo depois de um snapshot novo do coletor.
+        app.set_snapshot(Snapshot::default());
+        let s = app.selected_session().cloned().expect("sessão selecionada");
+        assert_eq!(s.kind, EXTERNAL_KIND);
+        assert_eq!(s.status, "aberta");
+        assert_eq!(s.agent.as_deref(), Some("Falso"));
+        assert!(s.alive);
+        assert_eq!(s.name, dir.file_name().map(|n| format!("falso {}", n.to_string_lossy())).unwrap());
+
+        // A tela desenha sem quebrar, com a sessão e o chat.
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 45)).unwrap();
+        term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text: String = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>() + "\n")
+            .collect();
+        assert!(text.contains("◆"), "{text}");
+        assert!(text.contains("AGENTE-FALSO"), "{text}");
+        assert!(text.contains(crate::i18n::t("o dashboard ainda não lê os tokens deste agente", "the dashboard does not read this agent's tokens yet")), "{text}");
+
+        // F12 devolve o teclado; x pede confirmação; y fecha o chat.
+        key(&mut app, KeyCode::F(12), &ctl);
+        key(&mut app, KeyCode::Char('x'), &ctl);
+        assert!(app.confirm.as_ref().is_some_and(|c| c.kill_chat.is_some()));
+        key(&mut app, KeyCode::Char('y'), &ctl);
+        let t0 = Instant::now();
+        while !app.terms.is_empty() && t0.elapsed() < Duration::from_secs(10) {
+            app.reap_terms();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(app.terms.is_empty(), "o chat não fechou");
+        assert!(app.snap.sessions.iter().all(|s| s.kind != EXTERNAL_KIND));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Sessão de outro agente como o coletor entrega (ex.: Antigravity).
+    fn agent_session(id: &str, cwd: &str, pid: Option<u32>) -> SessionInfo {
+        SessionInfo {
+            pid,
+            session_id: id.into(),
+            name: format!("conversa {id}"),
+            cwd: cwd.into(),
+            status: if pid.is_some() { "idle".into() } else { "encerrada".into() },
+            kind: "antigravity".into(),
+            agent: Some("Falso".into()),
+            bg_id: None,
+            pending: None,
+            version: String::new(),
+            started_at: None,
+            alive: pid.is_some(),
+            title: None,
+            last_prompt: None,
+            usage: Usage::default(),
+            agents_usage: Tokens::default(),
+            events: Vec::new(),
+            transcript: None,
+            cpu: 0.0,
+            mem: 0,
+            procs: Vec::new(),
+            agents_total: 0,
+            agents_running: 0,
+            tasks_running: 0,
+        }
+    }
+
+    /// Sessões de outro agente vistas pelo coletor: Enter retoma uma encerrada
+    /// aqui no painel, a sessão do chat não aparece duplicada, um chat novo
+    /// ganha o id da conversa quando ela aparece, e `x` numa sessão de outro
+    /// terminal pede para encerrar o processo dela.
+    #[test]
+    fn sessoes_de_outro_agente_como_as_do_claude() {
+        let dir = std::env::temp_dir().join(format!("agent-dash-retomar-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("agenteretoma.cmd");
+        std::fs::write(&fake, "@echo off\r\necho AGENTE-RETOMA %*\r\npause >nul\r\n").unwrap();
+        let cwd = dir.display().to_string();
+
+        let (ctl, rx) = mpsc::channel();
+        let mut app = App::new();
+        app.agents.push(AgentDef {
+            name: "Falso".into(),
+            command: fake.display().to_string(),
+            args: Vec::new(),
+            models: Vec::new(),
+            model_flag: None,
+            prompt_flag: None,
+            install: None,
+            resume_flag: Some("--retomar".into()),
+        });
+
+        // 1) Conversa encerrada: Enter retoma aqui, com a flag de retomar.
+        let snap = |sessions| Snapshot { sessions, ..Default::default() };
+        app.set_snapshot(snap(vec![agent_session("conv-1", &cwd, None)]));
+        app.show_all = true; // encerradas só aparecem com `a`
+        app.resync();
+        key(&mut app, KeyCode::Enter, &ctl);
+        assert_eq!(app.terms.len(), 1, "não retomou: {:?}", app.status);
+        assert_eq!(app.terms[0].key, "conv-1");
+        assert!(app.terms[0].restorable);
+        let t0 = Instant::now();
+        while !app.terms[0].contents().contains("AGENTE-RETOMA") && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(app.terms[0].contents().contains("AGENTE-RETOMA --retomar conv-1"), "{}", app.terms[0].contents());
+
+        // 2) O coletor passa a ver a conversa viva (mesmo pid): uma entrada só.
+        let pid = app.terms[0].pid();
+        app.set_snapshot(snap(vec![agent_session("conv-1", &cwd, pid)]));
+        assert_eq!(app.snap.sessions.len(), 1, "sessão duplicada");
+        // Fica anotada para reabrir quando o dashboard abrir de novo.
+        let saved: Vec<SavedChat> = serde_json::from_str(&std::fs::read_to_string(open_chats_path().unwrap()).unwrap()).unwrap();
+        assert!(saved.iter().any(|c| c.session_id == "conv-1" && c.agent.as_deref() == Some("Falso")));
+
+        // 3) Chat novo (sem conversa): quando o coletor acha a conversa pelo pid,
+        //    o chat passa a ter o id dela e vira "reabrível".
+        app.terms[0].kill();
+        let t0 = Instant::now();
+        while !app.terms.is_empty() && t0.elapsed() < Duration::from_secs(10) {
+            app.reap_terms();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        app.chat_focus = false;
+        let fake_path = fake.clone();
+        app.spawn_agent_chat("Falso", &fake_path, "novo".into(), &cwd, &[], None);
+        assert!(!app.terms[0].restorable);
+        let pid = app.terms[0].pid();
+        app.set_snapshot(snap(vec![agent_session("conv-2", &cwd, pid)]));
+        assert_eq!(app.terms[0].key, "conv-2");
+        assert!(app.terms[0].restorable);
+        assert_eq!(app.snap.sessions.len(), 1);
+        assert_eq!(app.chat_key.as_deref(), Some("conv-2"));
+        app.terms[0].kill();
+
+        // 4) Viva em outro terminal: x pede para encerrar o processo dela.
+        app.terms.clear();
+        app.chat_focus = false;
+        app.set_snapshot(snap(vec![agent_session("conv-3", &cwd, Some(424242))]));
+        app.states[0].select(Some(0));
+        key(&mut app, KeyCode::Char('x'), &ctl);
+        let c = app.confirm.take().expect("pediu confirmação");
+        assert!(matches!(&c.action, Some(Action::KillAgent { session_id }) if session_id == "conv-3"));
+        // Enter nela não abre outro processo na mesma conversa.
+        key(&mut app, KeyCode::Enter, &ctl);
+        assert!(app.terms.is_empty());
+        drop(rx);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Agente que não está no PATH: o formulário não fecha e diz como instalar.
+    #[test]
+    fn agente_nao_instalado_mostra_como_instalar() {
+        let (ctl, _rx) = mpsc::channel();
+        let mut app = App::new();
+        app.agents.push(AgentDef {
+            name: "Fantasma".into(),
+            command: "agente-que-nao-existe-xyz".into(),
+            args: Vec::new(),
+            models: Vec::new(),
+            model_flag: None,
+            prompt_flag: None,
+            install: Some("npm install -g fantasma".into()),
+            resume_flag: None,
+        });
+        let n_agents = app.agents.len();
+        key(&mut app, KeyCode::Char('n'), &ctl);
+        app.launcher.as_mut().unwrap().repo = std::env::temp_dir().display().to_string();
+        key(&mut app, KeyCode::Tab, &ctl);
+        for _ in 0..n_agents - 1 {
+            key(&mut app, KeyCode::Right, &ctl);
+        }
+        key(&mut app, KeyCode::Enter, &ctl);
+        let err = app.launcher.as_ref().and_then(|f| f.error.clone()).unwrap_or_default();
+        assert!(err.contains("npm install -g fantasma"), "{err}");
+        assert!(app.terms.is_empty());
+    }
+
+    fn screen(app: &mut App) -> String {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 45)).unwrap();
+        term.draw(|f| crate::ui::draw(f, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..buf.area.height).map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect()
+    }
+
+    /// Uso separado por agente: tokens da sessão do Antigravity, cabeçalho e
+    /// tabela por agente, e `v` filtrando um agente só.
+    #[test]
+    fn uso_separado_por_agente() {
+        let (ctl, _rx) = mpsc::channel();
+        let today = Local::now().date_naive();
+        let tok = |input, cache_read, output| Tokens { input, cache_write: 0, cache_read, output };
+        let (claude, agy) = (tok(1_000, 2_000_000, 50_000), tok(10_126, 0, 170));
+        let mut s = agent_session("conv-agy", "C:\\proj", Some(4242));
+        s.agent = Some(crate::antigravity::AGENT.into());
+        s.usage = Usage { tokens: agy, last_turn: agy, turns: 1, model: Some("gemini-teste".into()), ..Default::default() };
+        let mut snap = Snapshot { sessions: vec![s], ..Default::default() };
+        let mut total = claude;
+        total.add(&agy);
+        snap.daily.insert(today, total);
+        snap.daily_by_agent.insert(today, [(CLAUDE.to_string(), claude), ("Antigravity".to_string(), agy)].into());
+        snap.daily_by_model.insert(
+            today,
+            [(CLAUDE.to_string(), [("claude-opus-5-5".to_string(), claude)].into()), ("Antigravity".to_string(), [("gemini-teste".to_string(), agy)].into())].into(),
+        );
+        snap.per_minute = vec![0; 60];
+        let mut app = App::new();
+        app.set_snapshot(snap);
+        app.resync();
+
+        // Sessão do Antigravity com tokens: coluna e resumo.
+        let text = screen(&mut app);
+        let k = crate::i18n::t;
+        assert!(text.contains("10.3k"), "{text}");
+        assert!(text.contains(k("Contexto atual", "Current context")), "{text}");
+        assert!(text.contains("gemini-teste"), "{text}");
+        // Cabeçalho com um número por agente.
+        assert!(text.contains("Claude 2.1M · Antigravity 10.3k"), "{text}");
+
+        // Painel de uso: modelos agrupados por agente.
+        key(&mut app, KeyCode::Char('4'), &ctl);
+        let text = screen(&mut app);
+        assert!(text.contains("  claude-opus-5-5") && text.contains("  gemini-teste"), "{text}");
+        assert!(text.contains("■ Claude") && text.contains("■ Antigravity"), "{text}");
+
+        // `v`: Claude, depois só Antigravity, depois todos de novo.
+        key(&mut app, KeyCode::Char('v'), &ctl);
+        assert_eq!(app.usage_filter.as_deref(), Some(CLAUDE));
+        key(&mut app, KeyCode::Char('v'), &ctl);
+        assert_eq!(app.usage_filter.as_deref(), Some("Antigravity"));
+        let text = screen(&mut app);
+        assert!(!text.contains("claude-opus-5-5"), "{text}");
+        assert!(text.contains("gemini-teste") && text.contains("Antigravity 10.3k"), "{text}");
+        assert_eq!(app.days(), vec![(today, agy)]);
+        key(&mut app, KeyCode::Char('v'), &ctl);
+        assert_eq!(app.usage_filter, None);
+    }
 }
