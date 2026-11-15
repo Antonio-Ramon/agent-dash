@@ -638,7 +638,9 @@ impl Collector {
         }
         // O shell de onde o agente foi aberto continua na aba; ele herda o terminal
         // no estado em que o agente deixou (mouse capturado etc.) e precisa de limpeza.
-        let shell = self.sys.process(Pid::from_u32(pid)).and_then(|p| p.parent()).filter(|pp| self.sys.process(*pp).is_some());
+        // Chat aberto no painel é filho do próprio dashboard: limpar o console dele
+        // desligaria a captura de mouse do dashboard.
+        let shell = self.sys.process(Pid::from_u32(pid)).and_then(|p| p.parent()).filter(|pp| *pp != me && self.sys.process(*pp).is_some());
         let n = kill_tree(&self.sys, &children, Pid::from_u32(pid));
         if let Some(pp) = shell {
             actions::spawn_console_reset(pp.as_u32());

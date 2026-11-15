@@ -398,7 +398,14 @@ fn draw_launcher(f: &mut Frame, app: &App) {
         let st = if form.field == i { Style::new().fg(Color::Black).bg(ACCENT).bold() } else { Style::new().fg(DIM) };
         Span::styled(format!(" {name:<12}"), st)
     };
-    let cursor = |i: usize| if form.field == i { Span::styled("▏", Style::new().fg(ACCENT)) } else { Span::raw("") };
+    // Campo de texto, com o cursor onde se está editando.
+    let text = |i: usize, s: &str| -> Vec<Span<'static>> {
+        if form.field != i {
+            return vec![Span::raw(s.to_string())];
+        }
+        let (a, b) = crate::app::split_cursor(s, form.back);
+        vec![Span::raw(a.to_string()), Span::styled("▏", Style::new().fg(ACCENT)), Span::raw(b.to_string())]
+    };
     let choice = |opts: &[&str], sel: usize| -> Vec<Span<'static>> {
         let mut v = vec![Span::raw(" ")];
         for (i, o) in opts.iter().enumerate() {
@@ -443,27 +450,29 @@ fn draw_launcher(f: &mut Frame, app: &App) {
     let mut mode = vec![label(F_MODE, t("Modo", "Mode"))];
     mode.extend(choice(&modes[..form.modes(&app.agents)], form.mode));
     let lines = vec![
-        Line::from(vec![label(F_REPO, t("Repositório", "Repository")), Span::raw(" "), Span::raw(form.repo.clone()), cursor(F_REPO)]),
+        Line::from([vec![label(F_REPO, t("Repositório", "Repository")), Span::raw(" ")], text(F_REPO, &form.repo)].concat()),
         Line::from(agent),
         Line::from(model),
         Line::from(mode),
-        Line::from(vec![
-            label(F_NAME, t("Nome", "Name")),
-            Span::raw(" "),
-            Span::raw(form.name.clone()),
-            cursor(F_NAME),
-            Span::styled(if form.name.is_empty() && form.field != F_NAME { t("(opcional)", "(optional)") } else { "" }, Style::new().fg(DIM).italic()),
-        ]),
-        Line::from(vec![
-            label(F_PROMPT, "Prompt"),
-            Span::raw(" "),
-            Span::raw(form.prompt.clone()),
-            cursor(F_PROMPT),
-            Span::styled(
-                if form.prompt.is_empty() && form.field != F_PROMPT { t("(opcional: primeira mensagem)", "(optional: first message)") } else { "" },
-                Style::new().fg(DIM).italic(),
-            ),
-        ]),
+        Line::from(
+            [
+                vec![label(F_NAME, t("Nome", "Name")), Span::raw(" ")],
+                text(F_NAME, &form.name),
+                vec![Span::styled(if form.name.is_empty() && form.field != F_NAME { t("(opcional)", "(optional)") } else { "" }, Style::new().fg(DIM).italic())],
+            ]
+            .concat(),
+        ),
+        Line::from(
+            [
+                vec![label(F_PROMPT, "Prompt"), Span::raw(" ")],
+                text(F_PROMPT, &form.prompt),
+                vec![Span::styled(
+                    if form.prompt.is_empty() && form.field != F_PROMPT { t("(opcional: primeira mensagem)", "(optional: first message)") } else { "" },
+                    Style::new().fg(DIM).italic(),
+                )],
+            ]
+            .concat(),
+        ),
     ];
     f.render_widget(Paragraph::new(lines), fields);
 
@@ -631,7 +640,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         let keys: &[(&str, &str)] = &[
             ("Tab ↑↓", t("campo", "field")),
             ("↑↓", t("repositório", "repository")),
-            ("← →", t("modelo/modo", "model/mode")),
+            ("← →", t("opção/cursor no texto", "option/cursor in text")),
             ("Ctrl+U", t("limpar campo", "clear field")),
             ("Enter", t("iniciar", "start")),
             ("Esc", t("cancelar", "cancel")),
