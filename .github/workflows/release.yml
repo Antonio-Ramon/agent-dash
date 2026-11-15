@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: read
 
 jobs:
   release:
@@ -49,5 +50,8 @@ jobs:
         if: steps.v.outputs.new == 'true'
         shell: bash
         run: |
+          # A descrição do PR que trouxe a versão vai antes da lista gerada pelo GitHub.
+          # ponytail: só o PR deste commit; os outros PRs desde o último release entram só pelo título.
+          gh api "repos/${{ github.repository }}/commits/$GITHUB_SHA/pulls" -q '.[0].body // ""' > notas.md || true
           gh release create "v${{ steps.v.outputs.version }}" target/release/agent-dash.exe \
-            --target "$GITHUB_SHA" --title "v${{ steps.v.outputs.version }}" --generate-notes
+            --target "$GITHUB_SHA" --title "v${{ steps.v.outputs.version }}" --generate-notes --notes-file notas.md

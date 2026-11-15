@@ -105,7 +105,15 @@ pub struct LaunchForm {
     pub mode: usize,
     pub name: String,
     pub prompt: String,
+    /// Cursor do campo de texto, em caracteres antes do fim (0 = no fim).
+    pub back: usize,
     pub error: Option<String>,
+}
+
+/// Texto partido no cursor, que fica `back` caracteres antes do fim.
+pub fn split_cursor(s: &str, back: usize) -> (&str, &str) {
+    let i = s.char_indices().rev().take(back).last().map_or(s.len(), |(i, _)| i);
+    s.split_at(i)
 }
 
 pub const F_REPO: usize = 0;
@@ -1599,6 +1607,7 @@ impl App {
             mode: 0,
             name: String::new(),
             prompt: String::new(),
+            back: 0,
             error: None,
         });
     }
@@ -1611,6 +1620,7 @@ impl App {
         f.error = None;
         let n_sug = f.suggestions(&repos).len();
         let cycle = |cur: usize, n: usize, fwd: bool| if n == 0 { 0 } else if fwd { (cur + 1) % n } else { (cur + n - 1) % n };
+        let (field, repo) = (f.field, f.repo.clone());
         match k.code {
             KeyCode::Esc => {
                 self.launcher = None;
@@ -1638,23 +1648,47 @@ impl App {
                     _ => f.mode = cycle(f.mode, f.modes(&agent_defs), fwd),
                 }
             }
+            // Campo de texto: setas, Home e End andam pelo texto.
+            KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End if matches!(f.field, F_REPO | F_NAME | F_PROMPT) => {
+                let n = text_field(f).map_or(0, |t| t.chars().count());
+                f.back = match k.code {
+                    KeyCode::Left => (f.back + 1).min(n),
+                    KeyCode::Right => f.back.saturating_sub(1),
+                    KeyCode::Home => n,
+                    _ => 0,
+                };
+            }
             KeyCode::Char('u') if ctrl => {
                 if let Some(t) = text_field(f) {
                     t.clear();
                 }
-                f.sug = 0;
+                f.back = 0;
             }
             KeyCode::Backspace => {
-                if let Some(t) = text_field(f) {
-                    t.pop();
+                let back = f.back;
+                if let Some(t) = text_field(f)
+                    && let Some(c) = split_cursor(t, back).0.chars().next_back()
+                {
+                    let i = split_cursor(t, back).0.len() - c.len_utf8();
+                    t.remove(i);
                 }
-                f.sug = 0;
+            }
+            KeyCode::Delete => {
+                let back = f.back;
+                if let Some(t) = text_field(f)
+                    && back > 0
+                {
+                    let i = split_cursor(t, back).0.len();
+                    t.remove(i);
+                    f.back -= 1;
+                }
             }
             KeyCode::Char(c) if !ctrl || term::is_altgr(&k) => {
+                let back = f.back;
                 if let Some(t) = text_field(f) {
-                    t.push(c);
+                    let i = split_cursor(t, back).0.len();
+                    t.insert(i, c);
                 }
-                f.sug = 0;
             }
             KeyCode::Enter => {
                 let Some(cwd) = f.chosen(&repos) else {
@@ -1722,6 +1756,13 @@ impl App {
                 return;
             }
             _ => {}
+        }
+        if f.field != field {
+            f.back = 0;
+        }
+        // A lista de repositórios só volta ao topo quando o filtro muda.
+        if f.repo != repo {
+            f.sug = 0;
         }
     }
 
@@ -2081,6 +2122,37 @@ mod tests {
         let err = app.launcher.as_ref().and_then(|f| f.error.clone()).unwrap_or_default();
         assert!(err.contains("npm install -g fantasma"), "{err}");
         assert!(app.terms.is_empty());
+    }
+
+    /// Digitar no Nome não perde o repositório escolhido; setas, Home, End,
+    /// Delete e Backspace editam no meio do texto.
+    #[test]
+    fn formulario_edita_no_meio_e_guarda_repositorio() {
+        let (ctl, _rx) = mpsc::channel();
+        let mut app = App::new();
+        app.snap.repos = (0..5).map(|i| format!("C:\\repo{i}")).collect();
+        key(&mut app, KeyCode::Char('n'), &ctl);
+        app.launcher.as_mut().unwrap().repo.clear();
+        for _ in 0..3 {
+            key(&mut app, KeyCode::Down, &ctl);
+        }
+        for _ in 0..4 {
+            key(&mut app, KeyCode::Tab, &ctl); // Nome
+        }
+        for c in "ab".chars() {
+            key(&mut app, KeyCode::Char(c), &ctl);
+        }
+        key(&mut app, KeyCode::Left, &ctl);
+        key(&mut app, KeyCode::Char('ç'), &ctl);
+        assert_eq!(app.launcher.as_ref().unwrap().name, "açb");
+        assert!(screen(&mut app).contains("aç▏b"));
+        key(&mut app, KeyCode::Home, &ctl);
+        key(&mut app, KeyCode::Delete, &ctl);
+        key(&mut app, KeyCode::End, &ctl);
+        key(&mut app, KeyCode::Backspace, &ctl);
+        let f = app.launcher.as_ref().unwrap();
+        assert_eq!(f.name, "ç");
+        assert_eq!(f.chosen(&app.snap.repos).as_deref(), Some("C:\\repo3"));
     }
 
     fn screen(app: &mut App) -> String {
