@@ -1,6 +1,6 @@
 [package]
 name = "agent-dash"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 description = "Dashboard TUI (estilo lazygit) para monitorar sessões, agentes, shells e consumo de tokens do Claude Code e de outros agentes (Antigravity, Codex)"
 authors = ["Antonio Ramon", "Mateus Cristo"]
