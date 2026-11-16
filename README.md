@@ -23,36 +23,21 @@ dentro do painel. Ver [Outros agentes](#outros-agentes-antigravity-codex).
 
 ## Instalação
 
-Precisa de Windows 10 ou 11, do Claude Code no PATH e do Rust. O passo a passo completo, com
-o que fazer em cada situação, está no [guia de instalação e uso](INSTALL.md). O resumo:
+Precisa de Windows 10 ou 11 e do Claude Code no PATH. **Não precisa de Rust:** cada release
+traz o `agent-dash.exe` pronto. O passo a passo completo está no
+[guia de instalação e uso](INSTALL.md).
 
-**1. Confira qual Rust você tem.** Num PowerShell novo:
-
-```powershell
-where.exe cargo
-rustc -vV | Select-String host
-```
-
-Vá de cima para baixo e pare na primeira linha que bater:
-
-| O que aparece | O que fazer |
-|---|---|
-| `cargo` não encontrado | Instale o rustup com o toolchain GNU ([guia, 2.2](INSTALL.md#22-instalar-o-rustup-com-o-toolchain-gnu)) |
-| Primeiro `cargo` em `C:\Program Files\Rust ...` | Esse Rust veio do instalador MSI, não tem rustup e não compila sem o C++ do Visual Studio. Desinstale e instale o rustup ([guia, 2.3](INSTALL.md#23-rust-instalado-pelo-msi)) |
-| Primeiro `cargo` em `.cargo\bin` e `host: x86_64-pc-windows-msvc` | Troque para o GNU: `rustup default stable-x86_64-pc-windows-gnu` ([guia, 2.4](INSTALL.md#24-rustup-na-variante-msvc)) |
-| Primeiro `cargo` em `.cargo\bin` e `host: x86_64-pc-windows-gnu` | Pronto, siga para o passo 2 |
-
-**2. Compile e instale** pelo PowerShell (leva de 1 a 3 minutos):
+**1. Baixe o executável e coloque no PATH.** Cole num PowerShell:
 
 ```powershell
-git clone https://github.com/Antonio-Ramon/agent-dash.git
-cd agent-dash
-cargo install --locked --path .
+$dir = "$env:LOCALAPPDATA\Programs\agent-dash"
+New-Item -ItemType Directory -Force $dir | Out-Null
+Invoke-WebRequest https://github.com/Antonio-Ramon/agent-dash/releases/latest/download/agent-dash.exe -OutFile "$dir\agent-dash.exe"
+$p = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($p -notlike "*$dir*") { [Environment]::SetEnvironmentVariable("Path", "$p;$dir", "User") }
 ```
 
-O `--locked` é obrigatório (o porquê está em [Compilar a partir do código](#compilar-a-partir-do-código)).
-
-**3. Confira** num terminal novo:
+**2. Confira** num terminal novo (o PATH novo só vale nos terminais abertos depois):
 
 ```powershell
 agent-dash --dump
@@ -64,6 +49,9 @@ Depois de instalado, o agent-dash **se atualiza sozinho**: ao abrir, confere o r
 no GitHub e, se houver versão nova, baixa o executável, troca o atual e reabre
 ([guia, 6](INSTALL.md#6-atualizar)).
 
+Quer compilar a partir do código? Aí sim precisa de Rust: veja
+[Compilar a partir do código](#compilar-a-partir-do-código).
+
 ## Rodar
 
 ```powershell
@@ -73,8 +61,8 @@ agent-dash --stop-task <id>   # para um shell/monitor em background pelo id
 agent-dash --help
 ```
 
-Se o comando não for encontrado, abra um terminal novo (o rustup adiciona
-`%USERPROFILE%\.cargo\bin` ao PATH) ou rode `.\target\release\agent-dash.exe`.
+Se o comando não for encontrado, abra um terminal novo: o PATH só muda nos terminais abertos
+depois da instalação.
 
 ## Atalhos
 
@@ -303,7 +291,8 @@ tokens (`—`), em vez de mostrar números errados. O banco é lido por um leito
 ## Compilar a partir do código
 
 Requer Rust 1.88 ou mais novo pelo rustup (testado com 1.99, toolchain `x86_64-pc-windows-gnu`).
-Para preparar o Rust, veja a seção [Instalação](#instalação).
+Para preparar o Rust (qual variante usar e como conferir a sua), veja o
+[guia, seção 2](INSTALL.md#2-preparar-o-rust).
 
 ```powershell
 cargo build --release              # gera target\release\agent-dash.exe
