@@ -223,7 +223,13 @@ pub fn text_between(p: &mut vt100::Parser, a: (i64, u16), b: (i64, u16)) -> Stri
         let c0 = if l == s.0 { s.1.min(cols) } else { 0 };
         let c1 = if l == e.0 { (e.1 + 1).min(cols) } else { cols };
         let text = if c0 < c1 { p.screen().rows(c0, c1 - c0).nth(r as usize).unwrap_or_default() } else { String::new() };
-        if l != e.0 && p.screen().row_wrapped(r) {
+        // A flag "wrapped" sozinha não basta: linha preenchida com espaços até a
+        // borda também a liga, e o vt100 não a desliga ao sobrescrever a linha.
+        // ponytail: heurística; linha quebrada de verdade com espaço bem na
+        // última coluna ganha \n no lugar do espaço.
+        let full = cols > 0
+            && p.screen().cell(r, cols - 1).is_some_and(|c| c.is_wide_continuation() || !c.contents().trim().is_empty());
+        if l != e.0 && full && p.screen().row_wrapped(r) {
             // Linha longa quebrada pelo terminal: continua na próxima sem \n.
             out.push_str(&text);
         } else {
@@ -375,6 +381,22 @@ mod tests {
 
     fn k(code: KeyCode, m: KeyModifiers) -> Option<Vec<u8>> {
         key_bytes(&KeyEvent::new(code, m))
+    }
+
+    #[test]
+    fn copia_nao_junta_linha_preenchida_com_espacos() {
+        // Preenchida com espaços até a borda, sem \n: são duas linhas.
+        let mut p = vt100::Parser::new(5, 20, 0);
+        p.process(format!("abc{}def", " ".repeat(17)).as_bytes());
+        assert_eq!(text_between(&mut p, (0, 0), (1, 19)), "abc\ndef");
+        // Flag velha: linha longa sobrescrita por linhas curtas.
+        let mut p = vt100::Parser::new(5, 20, 0);
+        p.process(format!("{}\x1b[Habc{}\r\ndef  ", "x".repeat(25), " ".repeat(17)).as_bytes());
+        assert_eq!(text_between(&mut p, (0, 0), (1, 19)), "abc\ndef");
+        // Linha longa de verdade continua sendo uma só.
+        let mut p = vt100::Parser::new(5, 20, 0);
+        p.process("x".repeat(25).as_bytes());
+        assert_eq!(text_between(&mut p, (0, 0), (1, 19)), "x".repeat(25));
     }
 
     #[test]
