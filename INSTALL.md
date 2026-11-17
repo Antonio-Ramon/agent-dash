@@ -187,7 +187,11 @@ Na primeira abertura o cabeçalho mostra "lendo histórico N%" enquanto o histó
 
 ### Abrir uma instância nova
 1. Aperte `n`.
-2. Escolha o repositório (digite para filtrar, `↑` `↓` para escolher) ou digite um caminho.
+2. Escolha o diretório: digite para filtrar os repositórios conhecidos ou digite o caminho de
+   qualquer pasta. A lista mostra, nesta ordem, o caminho digitado (se a pasta existe), os
+   repositórios conhecidos e as subpastas do disco que completam o caminho. `↑` `↓` escolhem;
+   `→` com o cursor no fim do texto entra na pasta destacada e lista as subpastas dela.
+   Caminho colado do Explorer, com aspas, e `~` (a pasta do usuário) funcionam.
 3. `Tab` vai para os outros campos: agente (Claude, Antigravity, Codex), modelo, modo (**aqui no painel**, aba nova do terminal ou, só no Claude, background), nome e prompt inicial. `←` `→` trocam agente, modelo e modo.
 4. `Enter` inicia.
 
