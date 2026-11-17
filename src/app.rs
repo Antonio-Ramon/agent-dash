@@ -15,6 +15,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
@@ -108,6 +109,26 @@ pub struct LaunchForm {
     /// Cursor do campo de texto, em caracteres antes do fim (0 = no fim).
     pub back: usize,
     pub error: Option<String>,
+    /// Subpastas da última pasta listada para completar o caminho digitado
+    /// (pasta, nomes). Lida de novo só quando a pasta muda.
+    pub dir_cache: RefCell<Option<(String, Vec<String>)>>,
+}
+
+/// De onde vem uma opção de diretório do formulário "nova instância".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChoiceKind {
+    /// O caminho digitado, quando a pasta existe e não é um repositório conhecido.
+    Typed,
+    /// Pasta onde já houve sessão do Claude.
+    Repo,
+    /// Subpasta do disco que completa o que foi digitado.
+    Folder,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Choice {
+    pub path: String,
+    pub kind: ChoiceKind,
 }
 
 /// Texto partido no cursor, que fica `back` caracteres antes do fim.
@@ -142,25 +163,117 @@ pub struct ChatSel {
 }
 
 impl LaunchForm {
-    /// Repositórios que combinam com o texto digitado (o igual primeiro).
-    pub fn suggestions<'a>(&self, repos: &'a [String]) -> Vec<&'a String> {
-        let q = self.repo.trim().to_lowercase();
-        // Caminho igual a um conhecido (ex.: pré-preenchido): mostra todos, ele primeiro.
-        let exact = repos.iter().any(|r| r.to_lowercase() == q);
-        let mut v: Vec<&String> = repos.iter().filter(|r| q.is_empty() || exact || r.to_lowercase().contains(&q)).collect();
-        v.sort_by_key(|r| r.to_lowercase() != q);
+    /// Opções de diretório para o texto digitado, nesta ordem:
+    ///
+    /// 1. o próprio caminho digitado, se a pasta existe e não é um repositório
+    ///    conhecido (assim `Enter` abre onde a pessoa digitou, e não num
+    ///    repositório que só contém o texto);
+    /// 2. os repositórios conhecidos que contêm o texto, o igual primeiro.
+    ///    Igual a um conhecido (ex.: pré-preenchido) mostra todos;
+    /// 3. as subpastas do disco que completam o caminho (`C:\proj\ag` →
+    ///    `C:\proj\agent-dash`; terminado em `\` lista o conteúdo da pasta).
+    pub fn suggestions(&self, repos: &[String]) -> Vec<Choice> {
+        let typed = typed_path(&self.repo);
+        let q = norm_path(&typed);
+        let ql = typed.to_lowercase().replace('/', "\\");
+        let exact = !q.is_empty() && repos.iter().any(|r| norm_path(r) == q);
+        let show_all = q.is_empty() || (exact && !typed.ends_with(is_sep));
+        let mut v = Vec::new();
+        if !exact && is_abs_dir(&typed) {
+            v.push(Choice { path: trim_sep(&typed), kind: ChoiceKind::Typed });
+        }
+        let mut rs: Vec<&String> = repos
+            .iter()
+            .filter(|r| show_all || norm_path(r) == q || r.to_lowercase().replace('/', "\\").contains(&ql))
+            .collect();
+        rs.sort_by_key(|r| norm_path(r) != q);
+        v.extend(rs.into_iter().map(|r| Choice { path: r.clone(), kind: ChoiceKind::Repo }));
+        for path in self.folder_matches(&typed) {
+            if !v.iter().any(|c| norm_path(&c.path) == norm_path(&path)) {
+                v.push(Choice { path, kind: ChoiceKind::Folder });
+            }
+        }
         v
     }
 
-    /// Diretório escolhido: a sugestão destacada ou o caminho digitado.
-    pub fn chosen(&self, repos: &[String]) -> Option<String> {
-        let sug = self.suggestions(repos);
-        if let Some(r) = sug.get(self.sug.min(sug.len().saturating_sub(1))) {
-            return Some((*r).clone());
+    /// Subpastas que completam o último pedaço do caminho digitado.
+    fn folder_matches(&self, typed: &str) -> Vec<String> {
+        const MAX: usize = 200;
+        let Some(i) = typed.rfind(is_sep) else { return Vec::new() };
+        let (dir, prefix) = (&typed[..=i], typed[i + 1..].to_lowercase());
+        if !Path::new(dir).is_absolute() {
+            return Vec::new();
         }
-        let t = self.repo.trim();
-        if !t.is_empty() && Path::new(t).is_dir() { Some(t.to_string()) } else { None }
+        let mut cache = self.dir_cache.borrow_mut();
+        if cache.as_ref().is_none_or(|(d, _)| d != dir) {
+            let mut names: Vec<String> = std::fs::read_dir(dir)
+                .map(|rd| rd.flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+                .unwrap_or_default();
+            names.sort_by_key(|n| n.to_lowercase());
+            *cache = Some((dir.to_string(), names));
+        }
+        let names = &cache.as_ref().expect("preenchido acima").1;
+        // Pastas ocultas (`.git`, `$Recycle.Bin`) só quando o texto já começa por elas.
+        let hidden = |n: &str| n.starts_with(['.', '$']) && !prefix.starts_with(['.', '$']);
+        names.iter().filter(|n| n.to_lowercase().starts_with(&prefix) && !hidden(n)).take(MAX).map(|n| format!("{dir}{n}")).collect()
     }
+
+    /// Opção destacada (a primeira, se a seleção passou do fim).
+    pub fn highlighted(&self, repos: &[String]) -> Option<Choice> {
+        let sug = self.suggestions(repos);
+        sug.get(self.sug.min(sug.len().saturating_sub(1))).cloned()
+    }
+
+    /// Diretório escolhido: a opção destacada.
+    pub fn chosen(&self, repos: &[String]) -> Option<String> {
+        self.highlighted(repos).map(|c| c.path)
+    }
+
+    /// Por que não há diretório para abrir.
+    pub fn no_dir_reason(&self) -> String {
+        let typed = typed_path(&self.repo);
+        if typed.is_empty() {
+            t("escolha um repositório da lista ou digite o caminho de uma pasta", "pick a repository from the list or type a folder path").into()
+        } else if !Path::new(&typed).is_absolute() {
+            tr!("digite o caminho completo da pasta (ex.: C:\\projetos\\{typed})", "type the full folder path (e.g. C:\\projects\\{typed})")
+        } else {
+            tr!("a pasta {typed} não existe", "the folder {typed} does not exist")
+        }
+    }
+}
+
+fn is_sep(c: char) -> bool {
+    c == '\\' || c == '/'
+}
+
+/// O texto do campo como caminho: sem espaços nas pontas, sem as aspas do
+/// "Copiar como caminho" do Explorer e com `~` virando a pasta do usuário.
+fn typed_path(s: &str) -> String {
+    let t = s.trim();
+    let t = t.strip_prefix('"').map(|x| x.strip_suffix('"').unwrap_or(x)).unwrap_or(t).trim();
+    if t == "~" || t.starts_with("~\\") || t.starts_with("~/") {
+        if let Some(home) = std::env::var_os("USERPROFILE") {
+            return format!("{}{}", home.to_string_lossy(), &t[1..]);
+        }
+    }
+    t.to_string()
+}
+
+/// Sem a barra do fim, a não ser na raiz (`C:\`, `\`).
+fn trim_sep(s: &str) -> String {
+    let t = s.trim_end_matches(is_sep);
+    if t.is_empty() || t.ends_with(':') { s.to_string() } else { t.to_string() }
+}
+
+/// Forma de comparar caminhos no Windows: sem a barra do fim, `/` como `\` e sem caixa.
+fn norm_path(s: &str) -> String {
+    let t = s.trim_end_matches(is_sep);
+    t.to_lowercase().replace('/', "\\")
+}
+
+fn is_abs_dir(s: &str) -> bool {
+    let p = Path::new(s);
+    p.is_absolute() && p.is_dir()
 }
 
 pub struct App {
@@ -1609,6 +1722,7 @@ impl App {
             prompt: String::new(),
             back: 0,
             error: None,
+            dir_cache: RefCell::new(None),
         });
     }
 
@@ -1630,6 +1744,15 @@ impl App {
             KeyCode::BackTab => f.field = (f.field + LAUNCH_FIELDS - 1) % LAUNCH_FIELDS,
             KeyCode::Down if f.field == F_REPO && n_sug > 0 => f.sug = (f.sug + 1).min(n_sug - 1),
             KeyCode::Up if f.field == F_REPO => f.sug = f.sug.saturating_sub(1),
+            // → com o cursor no fim do diretório: o texto vira a opção destacada
+            // e entra nela, listando as subpastas (como o Tab de um shell). Com o
+            // cursor no meio, → só anda pelo texto (braço de baixo).
+            KeyCode::Right if f.field == F_REPO && f.back == 0 => {
+                if let Some(c) = f.highlighted(&repos) {
+                    f.repo = if c.path.ends_with(is_sep) { c.path } else { format!("{}\\", c.path) };
+                    f.sug = 0;
+                }
+            }
             KeyCode::Down => f.field = (f.field + 1) % LAUNCH_FIELDS,
             KeyCode::Up => f.field = (f.field + LAUNCH_FIELDS - 1) % LAUNCH_FIELDS,
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if matches!(f.field, F_AGENT | F_MODEL | F_MODE) => {
@@ -1692,7 +1815,7 @@ impl App {
             }
             KeyCode::Enter => {
                 let Some(cwd) = f.chosen(&repos) else {
-                    f.error = Some(t("escolha um repositório da lista ou digite um caminho que exista", "pick a repository from the list or type a path that exists").into());
+                    f.error = Some(f.no_dir_reason());
                     return;
                 };
                 let Some(def) = agent_defs.get(f.agent).cloned() else { return };
@@ -2153,6 +2276,70 @@ mod tests {
         let f = app.launcher.as_ref().unwrap();
         assert_eq!(f.name, "ç");
         assert_eq!(f.chosen(&app.snap.repos).as_deref(), Some("C:\\repo3"));
+    }
+
+    /// Diretório digitado no formulário `n`. O bug: uma pasta que é parte do
+    /// caminho de um repositório conhecido (ex.: a pasta-mãe) abria a sessão no
+    /// repositório, e não onde a pessoa digitou.
+    #[test]
+    fn diretorio_digitado_vence_o_repositorio_que_o_contem() {
+        let base = std::env::temp_dir().join(format!("agent-dash-dir-{}", std::process::id()));
+        let (conhecido, novo) = (base.join("projeto-conhecido"), base.join("projeto-novo"));
+        for d in [&conhecido, &novo, &base.join(".oculto")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let (b, r, n) = (base.display().to_string(), conhecido.display().to_string(), novo.display().to_string());
+        let repos = vec![r.clone()];
+        let form = |text: &str| LaunchForm {
+            field: F_REPO,
+            repo: text.into(),
+            sug: 0,
+            agent: 0,
+            installed: Vec::new(),
+            model: 0,
+            mode: 0,
+            name: String::new(),
+            prompt: String::new(),
+            back: 0,
+            error: None,
+            dir_cache: RefCell::new(None),
+        };
+        let paths = |f: &LaunchForm| f.suggestions(&repos).into_iter().map(|c| c.path).collect::<Vec<_>>();
+
+        // A pasta-mãe vem primeiro, marcada como digitada; o repositório logo depois.
+        let f = form(&b);
+        assert_eq!(f.chosen(&repos), Some(b.clone()));
+        let kinds: Vec<ChoiceKind> = f.suggestions(&repos).into_iter().map(|c| c.kind).collect();
+        assert_eq!(kinds[..2], [ChoiceKind::Typed, ChoiceKind::Repo]);
+
+        // Colado do Explorer (com aspas) e com a barra no fim.
+        assert_eq!(form(&format!("\"{n}\\\"")).chosen(&repos), Some(n.clone()));
+
+        // Completa o último pedaço com as subpastas do disco.
+        assert_eq!(form(&format!("{b}\\projeto-n")).chosen(&repos), Some(n.clone()));
+        let dentro = paths(&form(&format!("{b}\\")));
+        assert_eq!(dentro.first(), Some(&b), "{dentro:?}");
+        assert!(dentro.contains(&n) && dentro.contains(&r), "{dentro:?}");
+        assert!(!dentro.iter().any(|p| p.ends_with(".oculto")), "pasta oculta sem pedir: {dentro:?}");
+        assert!(paths(&form(&format!("{b}\\."))).iter().any(|p| p.ends_with(".oculto")));
+
+        // Repositório conhecido (pré-preenchido) continua o primeiro.
+        assert_eq!(form(&r).chosen(&repos), Some(r.clone()));
+
+        // Pasta que não existe: nada para abrir, e o erro diz qual.
+        let f = form(&format!("{b}\\nao-existe"));
+        assert_eq!(f.chosen(&repos), None);
+        assert!(f.no_dir_reason().contains("nao-existe"));
+        assert!(form("projeto").no_dir_reason().contains("C:\\"));
+
+        // → entra na pasta destacada.
+        let (ctl, _rx) = mpsc::channel();
+        let mut app = App::new();
+        key(&mut app, KeyCode::Char('n'), &ctl);
+        app.launcher.as_mut().unwrap().repo = format!("{b}\\projeto-n");
+        key(&mut app, KeyCode::Right, &ctl);
+        assert_eq!(app.launcher.as_ref().unwrap().repo, format!("{n}\\"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn screen(app: &mut App) -> String {

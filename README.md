@@ -82,7 +82,7 @@ depois da instalação.
 | `a` | mostrar tudo das últimas 24h (sessões encerradas, agentes e tasks antigos) |
 | `f` | agentes/tasks só da sessão selecionada |
 | `v` | uso de tokens: todos os agentes ou um só (ver [Uso por agente](#uso-por-agente)) |
-| `n` | **nova instância**: escolhe repositório, agente (Claude, Antigravity, Codex ou um configurado por você, ver [Outros agentes](#outros-agentes-antigravity-codex)), modelo, onde abrir (aqui no painel, aba nova do terminal ou, só no Claude, background com `claude --bg`), nome e prompt inicial |
+| `n` | **nova instância**: escolhe o diretório (um repositório conhecido ou qualquer pasta digitada, com as subpastas completadas; `→` no fim do texto entra na pasta), agente (Claude, Antigravity, Codex ou um configurado por você, ver [Outros agentes](#outros-agentes-antigravity-codex)), modelo, onde abrir (aqui no painel, aba nova do terminal ou, só no Claude, background com `claude --bg`), nome e prompt inicial |
 | `o` | sessão encerrada: retoma numa aba nova (`claude --resume`); em background: abre (`claude attach`); task: abre a saída no Bloco de Notas |
 | `x` | parar o shell/monitor selecionado; encerrar a sessão selecionada (em background: `claude stop`). Sempre pede confirmação |
 | `d` / `D` | limpar da lista o item terminado / todos os terminados do painel (sessão em background encerrada: `claude rm`, com confirmação) |
@@ -232,7 +232,7 @@ Tudo é lido localmente, só leitura, de `~/.claude` (ou `$CLAUDE_CONFIG_DIR`):
 | Sessões em background (`claude --bg`) | `claude agents --json --all`, a cada 30 s numa thread à parte (e logo depois de cada ação ou `r`) |
 | Sessões do Antigravity | `~/.gemini/antigravity-cli` (`conversations/`, `presence/`, `cache/`, `history.jsonl`) + Restart Manager do Windows para saber qual `agy` está com cada conversa (a cada 5 s, só se houver `agy` rodando) |
 | Tokens do Antigravity | tabelas `steps` e `gen_metadata` de `conversations/<id>.db` (e do `-wal`), relidas só quando o arquivo muda |
-| Repositórios para "nova instância" | diretórios das sessões + projetos de `~/.claude.json` que ainda existem |
+| Diretórios para "nova instância" | diretórios das sessões + projetos de `~/.claude.json` que ainda existem; o caminho digitado e as subpastas que o completam são lidos do disco |
 | Tokens, modelo, ferramentas usadas, atividade | `projects/<projeto>/<sessionId>.jsonl` |
 | Subagentes (inclusive de workflows) | `projects/<projeto>/<sessionId>/subagents/**/agent-*.jsonl` + `.meta.json` |
 | Shells, monitors, workflows e agentes em background | início no `toolUseResult` (`backgroundTaskId`, `taskId`, `agentId`); fim na `<task-notification>` |

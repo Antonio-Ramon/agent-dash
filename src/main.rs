@@ -158,6 +158,11 @@ fn frame(size: &str) -> anyhow::Result<()> {
     app.set_snapshot(snap);
     let (ctl_tx, _ctl_rx) = mpsc::channel();
     let mut term = ratatui::Terminal::new(TestBackend::new(w, h))?;
+    // Pasta digitada no `n`: a pasta-mãe dos projetos (a do usuário), terminada em `\`.
+    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".into());
+    let mut typed_dir = vec![KeyCode::Esc, KeyCode::Char('n')];
+    typed_dir.extend(std::iter::repeat_n(KeyCode::Backspace, 300));
+    typed_dir.extend(format!("{home}\\").chars().map(KeyCode::Char));
     let keys: Vec<(&str, Vec<KeyCode>)> = vec![
         ("sessões", vec![]),
         ("tasks (aba saída)", vec![KeyCode::Char('3')]),
@@ -171,6 +176,7 @@ fn frame(size: &str) -> anyhow::Result<()> {
         ("ajuda", vec![KeyCode::Char('?')]),
         // Segundo agente da lista (Antigravity), primeiro modelo, prompt "teste".
         ("nova instância", vec![KeyCode::Esc, KeyCode::Char('['), KeyCode::Char('n'), KeyCode::Tab, KeyCode::Right, KeyCode::Tab, KeyCode::Right, KeyCode::Tab, KeyCode::Tab, KeyCode::Tab, KeyCode::Char('t'), KeyCode::Char('e'), KeyCode::Char('s'), KeyCode::Char('t'), KeyCode::Char('e')]),
+        ("nova instância: pasta digitada", typed_dir),
         ("confirmar encerrar", vec![KeyCode::Esc, KeyCode::Char('x')]),
         ("aba chat", vec![KeyCode::Esc, KeyCode::Char(']'), KeyCode::Char(']')]),
         // Segunda sessão da lista (com um Antigravity aberto, costuma ser ele).

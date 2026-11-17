@@ -391,7 +391,7 @@ fn draw_launcher(f: &mut Frame, app: &App) {
     let inner = block.inner(r);
     f.render_widget(block, r);
     let [fields, list, foot] = Layout::vertical([Constraint::Length(7), Constraint::Min(3), Constraint::Length(2)]).areas(inner);
-    use crate::app::{F_AGENT, F_MODE, F_MODEL, F_NAME, F_PROMPT, F_REPO};
+    use crate::app::{ChoiceKind, F_AGENT, F_MODE, F_MODEL, F_NAME, F_PROMPT, F_REPO};
     let def = app.agents.get(form.agent);
 
     let label = |i: usize, name: &str| {
@@ -450,7 +450,17 @@ fn draw_launcher(f: &mut Frame, app: &App) {
     let mut mode = vec![label(F_MODE, t("Modo", "Mode"))];
     mode.extend(choice(&modes[..form.modes(&app.agents)], form.mode));
     let lines = vec![
-        Line::from([vec![label(F_REPO, t("Repositório", "Repository")), Span::raw(" ")], text(F_REPO, &form.repo)].concat()),
+        Line::from(
+            [
+                vec![label(F_REPO, t("Diretório", "Directory")), Span::raw(" ")],
+                text(F_REPO, &form.repo),
+                vec![Span::styled(
+                    if form.repo.is_empty() { t("(filtra a lista ou digite um caminho: C:\\pasta\\…)", "(filters the list or type a path: C:\\folder\\…)") } else { "" },
+                    Style::new().fg(DIM).italic(),
+                )],
+            ]
+            .concat(),
+        ),
         Line::from(agent),
         Line::from(model),
         Line::from(mode),
@@ -485,10 +495,15 @@ fn draw_launcher(f: &mut Frame, app: &App) {
         .enumerate()
         .skip(start)
         .take(h)
-        .map(|(i, r)| {
+        .map(|(i, c)| {
             let st = if i == sel { Style::new().bg(SEL_BG).bold() } else { Style::new() };
-            let live = app.snap.sessions.iter().filter(|s| s.alive && s.cwd.eq_ignore_ascii_case(r)).count();
-            let mut spans = vec![Span::styled(format!(" {} ", if i == sel { "›" } else { " " }), Style::new().fg(ACCENT)), Span::styled(r.to_string(), st)];
+            let mut spans = vec![Span::styled(format!(" {} ", if i == sel { "›" } else { " " }), Style::new().fg(ACCENT)), Span::styled(c.path.clone(), st)];
+            match c.kind {
+                ChoiceKind::Typed => spans.push(Span::styled(t("  caminho digitado", "  typed path"), Style::new().fg(Color::Cyan))),
+                ChoiceKind::Folder => spans.push(Span::styled(t("  pasta", "  folder"), Style::new().fg(DIM))),
+                ChoiceKind::Repo => {}
+            }
+            let live = app.snap.sessions.iter().filter(|s| s.alive && s.cwd.eq_ignore_ascii_case(&c.path)).count();
             if live > 0 {
                 let s = if live > 1 { "s" } else { "" };
                 spans.push(Span::styled(tr!("  ● {live} aberta{s}", "  ● {live} open"), Style::new().fg(Color::Green)));
@@ -498,13 +513,13 @@ fn draw_launcher(f: &mut Frame, app: &App) {
         .collect();
     let title = if sug.is_empty() {
         t(
-            " Nenhum repositório conhecido combina; Enter usa o caminho digitado se existir ",
-            " No known repository matches; Enter uses the typed path if it exists ",
+            " Nenhum repositório nem pasta combina: digite o caminho completo de uma pasta que exista ",
+            " No repository or folder matches: type the full path of an existing folder ",
         )
         .to_string()
     } else {
         let n = sug.len();
-        tr!(" Repositórios ({n}) · ↑↓ escolhe ", " Repositories ({n}) · ↑↓ to pick ")
+        tr!(" Diretórios ({n}) · ↑↓ escolhe · → entra na pasta ", " Directories ({n}) · ↑↓ to pick · → to open the folder ")
     };
     f.render_widget(
         List::new(items).block(Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(DIM)).title(title)),
