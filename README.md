@@ -69,6 +69,8 @@ depois da instalação.
 | Tecla | Ação |
 |---|---|
 | `1` `2` `3` `4` / `Tab` / `h` `l` | painel: Sessões, Agentes, Tasks, Uso por dia |
+| `F2` `F3` `F4` | mostrar/ocultar o card de Agentes, Tasks ou Uso por dia (o número traz de volta) |
+| `F5` | mostrar/ocultar o card Recursos (CPU, RAM, swap, rede, uptime) |
 | | os quatro painéis da esquerda têm altura fixa (não mudam com a quantidade de itens); lista maior que o painel rola, e o painel em foco mostra a barra de rolagem |
 | mouse | **roda**: rola o que está sob o cursor (lista, painel principal ou chat) sem mudar foco nem seleção; no chat a roda vai para o Claude, que rola a conversa como num terminal comum; **clique**: dá foco ao painel e seleciona a linha; clique no chat entrega o teclado a ele; **arrastar no chat** seleciona o texto e copia ao soltar (`Ctrl+C` com seleção copia de novo em vez de interromper o Claude). Fora do chat, para selecionar texto segure `Shift` |
 | `j` `k` / `↑` `↓` / `g` `G` | mover seleção |

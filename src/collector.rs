@@ -15,7 +15,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use sysinfo::{Networks, Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 pub enum Ctl {
     Refresh,
@@ -223,6 +223,9 @@ pub struct Collector {
     claude_dir: PathBuf,
     temp_claude: PathBuf,
     sys: System,
+    nets: Networks,
+    res: Resources,
+    res_at: Option<Instant>,
     files: HashMap<PathBuf, FileState>,
     global: Global,
     disc: Vec<Disc>,
@@ -400,6 +403,9 @@ impl Collector {
             claude_dir,
             temp_claude: std::env::temp_dir().join("claude"),
             sys: System::new(),
+            nets: Networks::new_with_refreshed_list(),
+            res: Resources::default(),
+            res_at: None,
             files: HashMap::new(),
             global: Global::default(),
             disc: Vec::new(),
@@ -685,8 +691,37 @@ impl Collector {
         self.history_pending
     }
 
+    /// CPU/RAM/swap/rede/uptime. No máximo uma amostra por segundo: o tick roda
+    /// a cada 60 ms enquanto lê o histórico, e CPU e taxa de rede precisam de
+    /// intervalo entre as leituras para fazer sentido.
+    fn sample_resources(&mut self) {
+        let secs = self.res_at.map(|t| t.elapsed().as_secs_f64());
+        if secs.is_some_and(|s| s < 0.9) {
+            return;
+        }
+        self.res_at = Some(Instant::now());
+        self.sys.refresh_cpu_usage();
+        self.sys.refresh_memory();
+        self.nets.refresh(true);
+        // ponytail: soma todas as interfaces (inclui loopback e adaptadores
+        // virtuais); filtrar por interface se o número enganar.
+        let (rx, tx) = self.nets.iter().fold((0u64, 0u64), |(r, t), (_, n)| (r + n.received(), t + n.transmitted()));
+        let rate = |b: u64| secs.map_or(0, |s| (b as f64 / s) as u64);
+        self.res = Resources {
+            cpu: self.sys.global_cpu_usage(),
+            mem_used: self.sys.used_memory(),
+            mem_total: self.sys.total_memory(),
+            swap_used: self.sys.used_swap(),
+            swap_total: self.sys.total_swap(),
+            net_rx: rate(rx),
+            net_tx: rate(tx),
+            uptime: System::uptime(),
+        };
+    }
+
     pub fn tick(&mut self) -> Snapshot {
         let t0 = Instant::now();
+        self.sample_resources();
         let metas = read_metas(&self.claude_dir.join("sessions"));
         self.sys.refresh_processes_specifics(
             ProcessesToUpdate::All,
@@ -1041,6 +1076,7 @@ impl Collector {
         let repos = self.repos(&sessions);
         let notices = std::mem::take(&mut *self.notices.lock().unwrap());
         Snapshot {
+            res: self.res,
             repos,
             notices,
             sessions,
