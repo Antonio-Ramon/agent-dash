@@ -314,19 +314,42 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         // Alturas fixas: dependem só da altura da tela, nunca do número de itens.
         // Lista maior que o painel rola (roda do mouse ou seleção).
         let h = left.height;
-        let [a, b, c, d] = Layout::vertical([
-            Constraint::Min(5),
-            Constraint::Length((h * 18 / 100).max(4)),
-            Constraint::Length((h * 20 / 100).max(4)),
-            Constraint::Length((h * 24 / 100).max(8)),
-        ])
-        .areas(left);
+        // Card oculto (F2/F3/F4) fica com altura 0: não desenha nem recebe clique.
+        let off = app.card_off;
+        let lens = |tight: bool| {
+            [(1usize, 18u16, 4u16), (2, 20, 4), (3, 24, 8)].map(|(i, pct, min)| match (off[i], tight) {
+                (true, _) => 0,
+                (_, true) => min,
+                _ => (h * pct / 100).max(min),
+            })
+        };
+        let fits = |v: [u16; 3]| h >= 5 + v.iter().sum::<u16>() + RES_H;
+        // Tela baixa: os outros cards encolhem até o mínimo para caber Recursos;
+        // se nem assim couber, Recursos cede o lugar.
+        let ([hb, hc, hd], hr) = match (app.res_off, fits(lens(false)), fits(lens(true))) {
+            (false, true, _) => (lens(false), RES_H),
+            (false, false, true) => (lens(true), RES_H),
+            _ => (lens(false), 0),
+        };
+        app.res_h = hr;
+        let [a, b, c, r, d] =
+            Layout::vertical([Constraint::Min(5), Constraint::Length(hb), Constraint::Length(hc), Constraint::Length(hr), Constraint::Length(hd)])
+                .areas(left);
         app.rects = [a, b, c, d];
         app.main_rect = right;
         draw_sessions(f, a, app);
-        draw_agents(f, b, app);
-        draw_tasks(f, c, app);
-        draw_days(f, d, app);
+        if hb > 0 {
+            draw_agents(f, b, app);
+        }
+        if hc > 0 {
+            draw_tasks(f, c, app);
+        }
+        if hr > 0 {
+            draw_resources(f, r, app);
+        }
+        if hd > 0 {
+            draw_days(f, d, app);
+        }
         draw_main(f, right, app);
     }
     draw_footer(f, footer, app);
@@ -861,6 +884,59 @@ fn draw_tasks(f: &mut Frame, area: Rect, app: &mut App) {
     if n == 0 {
         empty_hint(f, area, t("nada em background", "nothing in background"));
     }
+}
+
+/// Altura do card Recursos: 5 linhas + bordas.
+const RES_H: u16 = 7;
+
+fn fmt_gb(b: u64) -> String {
+    format!("{:.1}", b as f64 / 1_073_741_824.0)
+}
+
+/// Taxa em bytes por segundo, curta: 512B, 34K, 1.2M.
+fn fmt_rate(b: u64) -> String {
+    match b {
+        0..1024 => format!("{b}B"),
+        1024..1_048_576 => format!("{}K", b / 1024),
+        _ => format!("{:.1}M", b as f64 / 1_048_576.0),
+    }
+}
+
+fn fmt_uptime(s: u64) -> String {
+    let (d, h, m) = (s / 86_400, s % 86_400 / 3600, s % 3600 / 60);
+    if d > 0 { format!("{d}d {h:02}:{m:02}") } else { format!("{h:02}:{m:02}") }
+}
+
+/// Card só de leitura (não recebe foco): CPU, RAM, swap, rede e uptime.
+fn draw_resources(f: &mut Frame, area: Rect, app: &App) {
+    let r = &app.snap.res;
+    let block = panel_block(t("Recursos", "Resources").to_string(), false);
+    let w = block.inner(area).width as usize;
+    // Rótulo, barra que ocupa o que sobrar e valor à direita.
+    let meter = |label: &str, pct: f64, val: String| -> Line<'static> {
+        let color = if pct >= 85.0 { Color::Red } else if pct >= 60.0 { Color::Yellow } else { Color::Green };
+        let bar_w = w.saturating_sub(5 + 1 + val.chars().count());
+        let fill = ((pct / 100.0 * bar_w as f64).round() as usize).min(bar_w);
+        Line::from(vec![
+            Span::styled(format!("{label:<5}"), Style::new().fg(DIM)),
+            Span::styled("█".repeat(fill), Style::new().fg(color)),
+            Span::styled("░".repeat(bar_w - fill), Style::new().fg(DIM)),
+            Span::styled(format!(" {val}"), Style::new().fg(color)),
+        ])
+    };
+    let pct = |used: u64, total: u64| if total == 0 { 0.0 } else { used as f64 * 100.0 / total as f64 };
+    let lines = vec![
+        meter("CPU", r.cpu as f64, format!("{:>3.0}%", r.cpu)),
+        meter("RAM", pct(r.mem_used, r.mem_total), format!("{}/{}G", fmt_gb(r.mem_used), fmt_gb(r.mem_total))),
+        meter("SWAP", pct(r.swap_used, r.swap_total), format!("{}/{}G", fmt_gb(r.swap_used), fmt_gb(r.swap_total))),
+        Line::from(vec![
+            Span::styled("NET/s", Style::new().fg(DIM)),
+            Span::styled(format!("↓{} ", fmt_rate(r.net_rx)), Style::new().fg(Color::Green)),
+            Span::styled(format!("↑{}", fmt_rate(r.net_tx)), Style::new().fg(Color::Magenta)),
+        ]),
+        Line::from(vec![Span::styled("UP   ", Style::new().fg(DIM)), Span::raw(fmt_uptime(r.uptime))]),
+    ];
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn draw_days(f: &mut Frame, area: Rect, app: &mut App) {
@@ -1565,7 +1641,7 @@ fn draw_usage_main(f: &mut Frame, area: Rect, app: &mut App) {
 fn draw_help(f: &mut Frame) {
     let area = f.area();
     let w = 78.min(area.width.saturating_sub(4));
-    let h = 40.min(area.height.saturating_sub(2));
+    let h = 42.min(area.height.saturating_sub(2));
     let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
     let k = |key: &'static str, desc: &'static str| Line::from(vec![Span::styled(format!("  {key:<14}"), Style::new().fg(ACCENT).bold()), Span::raw(desc)]);
     let sec = |s: &'static str| Line::from(Span::styled(s, Style::new().fg(FOCUS).bold()));
@@ -1574,6 +1650,8 @@ fn draw_help(f: &mut Frame) {
         sec(t("Navegação", "Navigation")),
         k("1 2 3 4", t("ir para Sessões / Agentes / Tasks / Uso", "go to Sessions / Agents / Tasks / Usage")),
         k("Tab  h l ← →", t("painel anterior / próximo", "previous / next panel")),
+        k("F2 F3 F4", t("mostrar/ocultar Agentes / Tasks / Uso (o número reexibe)", "show/hide Agents / Tasks / Usage (the digit brings it back)")),
+        k("F5", t("mostrar/ocultar Recursos (CPU, RAM, swap, rede, uptime)", "show/hide Resources (CPU, RAM, swap, net, uptime)")),
         k("j k ↑ ↓", t("mover seleção", "move selection")),
         k("g G Home End", t("início / fim da lista", "top / bottom of the list")),
         k("[ ]", t("trocar aba do painel principal", "switch main panel tab")),

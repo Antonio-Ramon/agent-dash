@@ -301,6 +301,12 @@ pub struct App {
     pub show_all: bool,
     /// `f`: agentes/tasks só da sessão selecionada.
     pub only_selected: bool,
+    /// Cards da esquerda ocultos (F2/F3/F4), pelo índice do painel. Sessões nunca some.
+    pub card_off: [bool; 4],
+    /// Card Recursos oculto (F5).
+    pub res_off: bool,
+    /// Altura com que o card Recursos foi desenhado (0 = oculto ou não coube).
+    pub res_h: u16,
     /// `v`: uso de tokens de um agente só (`None` = todos somados).
     pub usage_filter: Option<String>,
     pub zoom: bool,
@@ -384,6 +390,9 @@ impl App {
             chat_sel: None,
             show_all: false,
             only_selected: false,
+            card_off: [false; 4],
+            res_off: false,
+            res_h: 0,
             usage_filter: None,
             zoom: false,
             help: false,
@@ -765,7 +774,27 @@ impl App {
         }
     }
 
+    /// Mostra/oculta um card da esquerda. Ocultar o que tem o foco devolve o foco a Sessões.
+    fn toggle_card(&mut self, p: Panel) {
+        let off = !self.card_off[p.idx()];
+        self.card_off[p.idx()] = off;
+        if off && self.focus == p {
+            self.set_focus(Panel::Sessions);
+        }
+        let name = match p {
+            Panel::Agents => t("Agentes", "Agents"),
+            Panel::Tasks => "Tasks",
+            _ => t("Uso por dia", "Daily usage"),
+        };
+        self.flash(match off {
+            true => tr!("{name}: oculto", "{name}: hidden"),
+            false => tr!("{name}: visível", "{name}: shown"),
+        });
+    }
+
     fn go_panel(&mut self, p: Panel) {
+        // Ir para um card oculto traz ele de volta.
+        self.card_off[p.idx()] = false;
         if self.panel_empty(p) && self.focus != p {
             let what = if p == Panel::Agents { t("nenhum agente", "no agent") } else { t("nenhuma task", "no task") };
             self.flash(tr!("{what} no momento (a mostra os terminados nas últimas 24h)", "{what} right now (a shows the ones finished in the last 24h)"));
@@ -779,7 +808,7 @@ impl App {
         let mut i = self.focus.idx();
         for _ in 0..4 {
             i = (i + step) % 4;
-            if !self.panel_empty(Panel::ALL[i]) {
+            if !self.card_off[i] && !self.panel_empty(Panel::ALL[i]) {
                 break;
             }
         }
@@ -880,6 +909,14 @@ impl App {
                 }
             }
             KeyCode::Char(c @ '1'..='4') => self.go_panel(Panel::ALL[(c as u8 - b'1') as usize]),
+            KeyCode::F(n @ 2..=4) => self.toggle_card(Panel::ALL[n as usize - 1]),
+            KeyCode::F(5) => {
+                self.res_off = !self.res_off;
+                self.flash(match self.res_off {
+                    true => t("Recursos: oculto", "Resources: hidden"),
+                    false => t("Recursos: visível (some se a tela for baixa demais)", "Resources: shown (dropped when the screen is too short)"),
+                });
+            }
             KeyCode::Tab | KeyCode::Char('l') | KeyCode::Right => {
                 self.cycle_panel(1);
             }
@@ -2014,6 +2051,32 @@ mod tests {
 
     fn key(app: &mut App, code: KeyCode, ctl: &Sender<Ctl>) {
         app.on_key(KeyEvent::new(code, KeyModifiers::NONE), ctl);
+    }
+
+    #[test]
+    fn ocultar_card_move_o_foco_e_o_numero_traz_de_volta() {
+        let (ctl, _rx) = mpsc::channel();
+        let mut app = App::new();
+        key(&mut app, KeyCode::Char('4'), &ctl);
+        assert_eq!(app.focus, Panel::Usage);
+        key(&mut app, KeyCode::F(4), &ctl);
+        assert!(app.card_off[3]);
+        assert_eq!(app.focus, Panel::Sessions, "ocultar o card com foco volta para Sessões");
+        // Tab pula o card oculto (Agentes e Tasks estão vazios aqui).
+        key(&mut app, KeyCode::Tab, &ctl);
+        assert_eq!(app.focus, Panel::Sessions);
+        key(&mut app, KeyCode::Char('4'), &ctl);
+        assert!(!app.card_off[3]);
+        assert_eq!(app.focus, Panel::Usage);
+        // Desenhado de verdade: Recursos cabe em 120x30 e card oculto fica sem área.
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        assert!(app.rects[3].height > 0 && app.res_h > 0, "120x30 mostra Uso e Recursos");
+        key(&mut app, KeyCode::F(4), &ctl);
+        key(&mut app, KeyCode::F(5), &ctl);
+        assert!(app.res_off);
+        term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        assert_eq!((app.rects[3].height, app.res_h), (0, 0));
     }
 
     /// Fluxo completo com um agente falso (um `.cmd`, como os atalhos que o npm

@@ -180,8 +180,25 @@ pub struct SessionInfo {
     pub tasks_running: usize,
 }
 
+/// Recursos da máquina, para o card Recursos.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Resources {
+    /// Uso global de CPU, 0–100.
+    pub cpu: f32,
+    pub mem_used: u64,
+    pub mem_total: u64,
+    pub swap_used: u64,
+    pub swap_total: u64,
+    /// Rede, bytes por segundo (soma das interfaces).
+    pub net_rx: u64,
+    pub net_tx: u64,
+    /// Segundos desde o boot.
+    pub uptime: u64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
+    pub res: Resources,
     pub sessions: Vec<SessionInfo>,
     pub agents: Vec<AgentInfo>,
     pub tasks: Vec<TaskInfo>,
