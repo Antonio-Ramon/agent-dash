@@ -924,6 +924,21 @@ fn vbar(pct: f64, rows: usize) -> Vec<char> {
     (0..rows).rev().map(|b| B[level.saturating_sub(b * 8).min(8)]).collect()
 }
 
+/// Porcentagem escrita embaixo de uma barra de `bw` colunas: "46%", ou só "46"
+/// quando o símbolo não cabe.
+fn bar_pct(pct: f64, bw: usize) -> String {
+    let p = pct.clamp(0.0, 100.0).round() as u32;
+    let full = format!("{p}%");
+    if full.len() <= bw {
+        full
+    } else if p.to_string().len() <= bw {
+        p.to_string()
+    } else {
+        // ponytail: "100" não cabe em 2 colunas sem colar no vizinho; mostra 99.
+        "99".into()
+    }
+}
+
 /// Card só de leitura (não recebe foco): uma barra vertical por CPU lógica,
 /// RAM e swap; rede no rodapé e uptime no título.
 fn draw_resources(f: &mut Frame, area: Rect, app: &App) {
@@ -934,16 +949,8 @@ fn draw_resources(f: &mut Frame, area: Rect, app: &App) {
     const SIDE: usize = 6;
     let r = &app.snap.res;
     let dim = Style::new().fg(DIM);
-    let block = panel_block(t("Recursos", "Resources").to_string(), false)
-        .title_top(Line::from(Span::styled(format!("up {}", fmt_uptime(r.uptime)), dim)).right_aligned())
-        .title_bottom(Line::from(vec![
-            Span::styled("NET ", dim),
-            Span::styled(format!("↓{} ", fmt_rate(r.net_rx)), Style::new().fg(Color::Green)),
-            Span::styled(format!("↑{}", fmt_rate(r.net_tx)), Style::new().fg(Color::Magenta)),
-        ]));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    let w = inner.width as usize;
+    // Largura útil: o card menos as duas bordas.
+    let w = area.width.saturating_sub(2) as usize;
     let avail = w.saturating_sub(SIDE).max(1);
     // Mais CPUs que colunas: cada coluna vira a média de um grupo vizinho.
     let per = r.cores.len().div_ceil(avail).max(1);
@@ -955,6 +962,23 @@ fn draw_resources(f: &mut Frame, area: Rect, app: &App) {
     let (bw, gap) = if fill >= 2 { (fill, 1) } else { (1, 0) };
     // RAM e swap nunca ficam mais finas que o rótulo de 2 letras.
     let side_w = bw.max(2);
+    let cpu = r.cpu as f64;
+    let summary = format!("CPU {cpu:.0}% ×{}", r.cores.len());
+    // Com % embaixo de cada barra, a média e o total de CPUs sobem para o título.
+    let per_bar = bw >= 2;
+    let title = match per_bar {
+        true => format!("{} · {summary}", t("Recursos", "Resources")),
+        false => t("Recursos", "Resources").to_string(),
+    };
+    let block = panel_block(title, false)
+        .title_top(Line::from(Span::styled(format!("up {}", fmt_uptime(r.uptime)), dim)).right_aligned())
+        .title_bottom(Line::from(vec![
+            Span::styled("NET ", dim),
+            Span::styled(format!("↓{} ", fmt_rate(r.net_rx)), Style::new().fg(Color::Green)),
+            Span::styled(format!("↑{}", fmt_rate(r.net_tx)), Style::new().fg(Color::Magenta)),
+        ]));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
     let cores_w = cols.len() * (bw + gap);
     let pct = |used: u64, total: u64| if total == 0 { 0.0 } else { used as f64 * 100.0 / total as f64 };
     let (ram, swap) = (pct(r.mem_used, r.mem_total), pct(r.swap_used, r.swap_total));
@@ -973,11 +997,16 @@ fn draw_resources(f: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(swap_bar[row].to_string().repeat(side_w), Style::new().fg(load_color(swap))));
         lines.push(Line::from(spans));
     }
-    let cpu = r.cpu as f64;
-    // Rótulo sob as CPUs; a versão curta entra quando as barras são estreitas.
-    let long = format!("CPU {cpu:.0}% ×{}", r.cores.len());
-    let label = if long.chars().count() <= cores_w { long } else { format!("{cpu:.0}% ×{}", r.cores.len()) };
-    lines.push(Line::from(vec![Span::styled(fit(&label, cores_w), Style::new().fg(load_color(cpu))), Span::styled(format!(" {} SW", fit("RM", side_w)), dim)]));
+    let mut labels: Vec<Span> = if per_bar {
+        cols.iter().map(|&c| Span::styled(fit(&bar_pct(c, bw), bw + gap), Style::new().fg(load_color(c)))).collect()
+    } else {
+        // Barras de 1 coluna não têm onde escrever: fica só a média.
+        let short = format!("{cpu:.0}% ×{}", r.cores.len());
+        let label = if summary.chars().count() <= cores_w { summary } else { short };
+        vec![Span::styled(fit(&label, cores_w), Style::new().fg(load_color(cpu)))]
+    };
+    labels.push(Span::styled(format!(" {} SW", fit("RM", side_w)), dim));
+    lines.push(Line::from(labels));
     // RAM e swap na mesma linha, na versão mais completa que couber.
     let abs = |used: u64, total: u64| format!("{}/{}G", fmt_gb(used), fmt_gb(total));
     let (ram_abs, swap_abs) = (abs(r.mem_used, r.mem_total), abs(r.swap_used, r.swap_total));
@@ -1876,6 +1905,8 @@ mod tests {
         assert_eq!(vbar(75.0, 2), ['▄', '█']);
         assert_eq!(vbar(250.0, 2), ['█', '█'], "acima de 100% não estoura");
         assert_eq!(vbar(50.0, 3), [' ', '▄', '█']);
+        assert_eq!((bar_pct(46.4, 3), bar_pct(100.0, 3), bar_pct(100.0, 4)), ("46%".into(), "100".into(), "100%".into()));
+        assert_eq!((bar_pct(7.0, 2), bar_pct(46.0, 2), bar_pct(100.0, 2)), ("7%".into(), "46".into(), "99".into()));
     }
 
     #[test]
