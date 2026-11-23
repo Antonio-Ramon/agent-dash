@@ -928,6 +928,8 @@ fn vbar(pct: f64, rows: usize) -> Vec<char> {
 /// RAM e swap; rede no rodapé e uptime no título.
 fn draw_resources(f: &mut Frame, area: Rect, app: &App) {
     const BAR_ROWS: usize = 3;
+    // Teto da largura de uma barra, para poucas CPUs não virarem blocos.
+    const MAX_BAR_W: usize = 6;
     // Logo depois das CPUs: " RR SS" (RAM e swap).
     const SIDE: usize = 6;
     let r = &app.snap.res;
@@ -946,8 +948,13 @@ fn draw_resources(f: &mut Frame, area: Rect, app: &App) {
     // Mais CPUs que colunas: cada coluna vira a média de um grupo vizinho.
     let per = r.cores.len().div_ceil(avail).max(1);
     let cols: Vec<f64> = r.cores.chunks(per).map(|c| c.iter().sum::<f32>() as f64 / c.len() as f64).collect();
-    // Sobrando espaço, barra de 2 colunas com 1 de respiro.
-    let (bw, gap) = if cols.len() * 3 <= avail { (2, 1) } else { (1, 0) };
+    // As barras (CPUs + RAM + swap) dividem a largura do card, com 1 coluna de
+    // respiro entre elas; sem espaço para isso, ficam com 1 coluna e sem respiro.
+    let n_bars = cols.len() + 2;
+    let fill = (w.saturating_sub(n_bars) / n_bars).min(MAX_BAR_W);
+    let (bw, gap) = if fill >= 2 { (fill, 1) } else { (1, 0) };
+    // RAM e swap nunca ficam mais finas que o rótulo de 2 letras.
+    let side_w = bw.max(2);
     let cores_w = cols.len() * (bw + gap);
     let pct = |used: u64, total: u64| if total == 0 { 0.0 } else { used as f64 * 100.0 / total as f64 };
     let (ram, swap) = (pct(r.mem_used, r.mem_total), pct(r.swap_used, r.swap_total));
@@ -961,16 +968,16 @@ fn draw_resources(f: &mut Frame, area: Rect, app: &App) {
             .collect();
         // RAM e swap coladas nas CPUs, com 1 coluna de respiro.
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(ram_bar[row].to_string().repeat(2), Style::new().fg(load_color(ram))));
+        spans.push(Span::styled(ram_bar[row].to_string().repeat(side_w), Style::new().fg(load_color(ram))));
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(swap_bar[row].to_string().repeat(2), Style::new().fg(load_color(swap))));
+        spans.push(Span::styled(swap_bar[row].to_string().repeat(side_w), Style::new().fg(load_color(swap))));
         lines.push(Line::from(spans));
     }
     let cpu = r.cpu as f64;
     // Rótulo sob as CPUs; a versão curta entra quando as barras são estreitas.
     let long = format!("CPU {cpu:.0}% ×{}", r.cores.len());
     let label = if long.chars().count() <= cores_w { long } else { format!("{cpu:.0}% ×{}", r.cores.len()) };
-    lines.push(Line::from(vec![Span::styled(fit(&label, cores_w), Style::new().fg(load_color(cpu))), Span::styled(" RM SW", dim)]));
+    lines.push(Line::from(vec![Span::styled(fit(&label, cores_w), Style::new().fg(load_color(cpu))), Span::styled(format!(" {} SW", fit("RM", side_w)), dim)]));
     // RAM e swap na mesma linha, na versão mais completa que couber.
     let abs = |used: u64, total: u64| format!("{}/{}G", fmt_gb(used), fmt_gb(total));
     let (ram_abs, swap_abs) = (abs(r.mem_used, r.mem_total), abs(r.swap_used, r.swap_total));
