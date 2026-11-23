@@ -927,8 +927,8 @@ fn vbar(pct: f64, rows: usize) -> Vec<char> {
 /// Card só de leitura (não recebe foco): uma barra vertical por CPU lógica,
 /// RAM e swap; rede no rodapé e uptime no título.
 fn draw_resources(f: &mut Frame, area: Rect, app: &App) {
-    const BAR_ROWS: usize = 2;
-    // À direita das CPUs: " RR SS" (RAM e swap).
+    const BAR_ROWS: usize = 3;
+    // Logo depois das CPUs: " RR SS" (RAM e swap).
     const SIDE: usize = 6;
     let r = &app.snap.res;
     let dim = Style::new().fg(DIM);
@@ -941,12 +941,14 @@ fn draw_resources(f: &mut Frame, area: Rect, app: &App) {
         ]));
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let avail = (inner.width as usize).saturating_sub(SIDE).max(1);
+    let w = inner.width as usize;
+    let avail = w.saturating_sub(SIDE).max(1);
     // Mais CPUs que colunas: cada coluna vira a média de um grupo vizinho.
     let per = r.cores.len().div_ceil(avail).max(1);
     let cols: Vec<f64> = r.cores.chunks(per).map(|c| c.iter().sum::<f32>() as f64 / c.len() as f64).collect();
     // Sobrando espaço, barra de 2 colunas com 1 de respiro.
     let (bw, gap) = if cols.len() * 3 <= avail { (2, 1) } else { (1, 0) };
+    let cores_w = cols.len() * (bw + gap);
     let pct = |used: u64, total: u64| if total == 0 { 0.0 } else { used as f64 * 100.0 / total as f64 };
     let (ram, swap) = (pct(r.mem_used, r.mem_total), pct(r.swap_used, r.swap_total));
     let bars: Vec<(Vec<char>, Color)> = cols.iter().map(|&c| (vbar(c, BAR_ROWS), load_color(c))).collect();
@@ -957,25 +959,35 @@ fn draw_resources(f: &mut Frame, area: Rect, app: &App) {
             .iter()
             .map(|(b, color)| Span::styled(format!("{}{}", b[row].to_string().repeat(bw), " ".repeat(gap)), Style::new().fg(*color)))
             .collect();
-        spans.push(Span::raw(" ".repeat(avail.saturating_sub(cols.len() * (bw + gap)) + 1)));
+        // RAM e swap coladas nas CPUs, com 1 coluna de respiro.
+        spans.push(Span::raw(" "));
         spans.push(Span::styled(ram_bar[row].to_string().repeat(2), Style::new().fg(load_color(ram))));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(swap_bar[row].to_string().repeat(2), Style::new().fg(load_color(swap))));
         lines.push(Line::from(spans));
     }
     let cpu = r.cpu as f64;
+    // Rótulo sob as CPUs; a versão curta entra quando as barras são estreitas.
+    let long = format!("CPU {cpu:.0}% ×{}", r.cores.len());
+    let label = if long.chars().count() <= cores_w { long } else { format!("{cpu:.0}% ×{}", r.cores.len()) };
+    lines.push(Line::from(vec![Span::styled(fit(&label, cores_w), Style::new().fg(load_color(cpu))), Span::styled(" RM SW", dim)]));
+    // RAM e swap na mesma linha, na versão mais completa que couber.
+    let abs = |used: u64, total: u64| format!("{}/{}G", fmt_gb(used), fmt_gb(total));
+    let (ram_abs, swap_abs) = (abs(r.mem_used, r.mem_total), abs(r.swap_used, r.swap_total));
+    let variants = [
+        (format!("{ram_abs} {ram:.0}%"), format!("{swap_abs} {swap:.0}%")),
+        (ram_abs, swap_abs),
+        (format!("{ram:.0}%"), format!("{swap:.0}%")),
+    ];
+    let len = |v: &(String, String)| 4 + v.0.chars().count() + 2 + 5 + v.1.chars().count();
+    let [full, mid, short] = variants;
+    let (ram_txt, swap_txt) = [full, mid].into_iter().find(|v| len(v) <= w).unwrap_or(short);
     lines.push(Line::from(vec![
-        Span::styled(fit(&format!("CPU {cpu:.0}% ×{}", r.cores.len()), avail), Style::new().fg(load_color(cpu))),
-        Span::styled(" RM SW", dim),
+        Span::styled("RAM ", dim),
+        Span::styled(ram_txt, Style::new().fg(load_color(ram))),
+        Span::styled("  SWAP ", dim),
+        Span::styled(swap_txt, Style::new().fg(load_color(swap))),
     ]));
-    let text = |label: &str, used: u64, total: u64, p: f64| {
-        Line::from(vec![
-            Span::styled(format!("{label:<5}"), dim),
-            Span::styled(format!("{}/{}G {p:.0}%", fmt_gb(used), fmt_gb(total)), Style::new().fg(load_color(p))),
-        ])
-    };
-    lines.push(text("RAM", r.mem_used, r.mem_total, ram));
-    lines.push(text("SWAP", r.swap_used, r.swap_total, swap));
     f.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -1856,6 +1868,7 @@ mod tests {
         assert_eq!(vbar(50.0, 2), [' ', '█']);
         assert_eq!(vbar(75.0, 2), ['▄', '█']);
         assert_eq!(vbar(250.0, 2), ['█', '█'], "acima de 100% não estoura");
+        assert_eq!(vbar(50.0, 3), [' ', '▄', '█']);
     }
 
     #[test]
