@@ -323,14 +323,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 _ => (h * pct / 100).max(min),
             })
         };
-        let fits = |v: [u16; 3]| h >= 5 + v.iter().sum::<u16>() + RES_H;
+        let fits = |v: [u16; 3], res: u16| h >= 5 + v.iter().sum::<u16>() + res;
+        // Recursos alto pega 2 linhas de Uso por dia (que nunca desce do mínimo).
+        let lend = |mut v: [u16; 3]| {
+            if !off[3] {
+                v[2] = v[2].saturating_sub(2).max(8);
+            }
+            v
+        };
         // Tela baixa: os outros cards encolhem até o mínimo para caber Recursos;
         // se nem assim couber, Recursos cede o lugar.
-        let ([hb, hc, hd], hr) = match (app.res_off, fits(lens(false)), fits(lens(true))) {
-            (false, true, _) => (lens(false), RES_H),
-            (false, false, true) => (lens(true), RES_H),
-            _ => (lens(false), 0),
-        };
+        let options = [(lend(lens(false)), RES_H), (lens(true), RES_H), (lens(true), RES_H_MIN)];
+        let ([hb, hc, hd], hr) = options.into_iter().find(|(v, res)| !app.res_off && fits(*v, *res)).unwrap_or((lens(false), 0));
         app.res_h = hr;
         let [a, b, c, r, d] =
             Layout::vertical([Constraint::Min(5), Constraint::Length(hb), Constraint::Length(hc), Constraint::Length(hr), Constraint::Length(hd)])
@@ -886,8 +890,10 @@ fn draw_tasks(f: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-/// Altura do card Recursos: 5 linhas + bordas.
-const RES_H: u16 = 7;
+/// Altura do card Recursos: 5 linhas de barra, 2 de texto e as bordas.
+const RES_H: u16 = 9;
+/// Em tela baixa: 3 linhas de barra.
+const RES_H_MIN: u16 = 7;
 
 fn fmt_gb(b: u64) -> String {
     format!("{:.1}", b as f64 / 1_073_741_824.0)
@@ -942,7 +948,6 @@ fn bar_pct(pct: f64, bw: usize) -> String {
 /// Card só de leitura (não recebe foco): uma barra vertical por CPU lógica,
 /// RAM e swap; rede no rodapé e uptime no título.
 fn draw_resources(f: &mut Frame, area: Rect, app: &App) {
-    const BAR_ROWS: usize = 3;
     // Teto da largura de uma barra, para poucas CPUs não virarem blocos.
     const MAX_BAR_W: usize = 6;
     // Logo depois das CPUs: " RR SS" (RAM e swap).
@@ -979,13 +984,15 @@ fn draw_resources(f: &mut Frame, area: Rect, app: &App) {
         ]));
     let inner = block.inner(area);
     f.render_widget(block, area);
+    // As barras ficam com o que sobra das 2 linhas de texto.
+    let bar_rows = (inner.height as usize).saturating_sub(2).max(1);
     let cores_w = cols.len() * (bw + gap);
     let pct = |used: u64, total: u64| if total == 0 { 0.0 } else { used as f64 * 100.0 / total as f64 };
     let (ram, swap) = (pct(r.mem_used, r.mem_total), pct(r.swap_used, r.swap_total));
-    let bars: Vec<(Vec<char>, Color)> = cols.iter().map(|&c| (vbar(c, BAR_ROWS), load_color(c))).collect();
-    let (ram_bar, swap_bar) = (vbar(ram, BAR_ROWS), vbar(swap, BAR_ROWS));
+    let bars: Vec<(Vec<char>, Color)> = cols.iter().map(|&c| (vbar(c, bar_rows), load_color(c))).collect();
+    let (ram_bar, swap_bar) = (vbar(ram, bar_rows), vbar(swap, bar_rows));
     let mut lines = Vec::new();
-    for row in 0..BAR_ROWS {
+    for row in 0..bar_rows {
         let mut spans: Vec<Span> = bars
             .iter()
             .map(|(b, color)| Span::styled(format!("{}{}", b[row].to_string().repeat(bw), " ".repeat(gap)), Style::new().fg(*color)))
