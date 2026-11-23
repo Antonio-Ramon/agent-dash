@@ -709,6 +709,7 @@ impl Collector {
         let rate = |b: u64| secs.map_or(0, |s| (b as f64 / s) as u64);
         self.res = Resources {
             cpu: self.sys.global_cpu_usage(),
+            cores: self.sys.cpus().iter().map(|c| c.cpu_usage()).collect(),
             mem_used: self.sys.used_memory(),
             mem_total: self.sys.total_memory(),
             swap_used: self.sys.used_swap(),
@@ -1076,7 +1077,7 @@ impl Collector {
         let repos = self.repos(&sessions);
         let notices = std::mem::take(&mut *self.notices.lock().unwrap());
         Snapshot {
-            res: self.res,
+            res: self.res.clone(),
             repos,
             notices,
             sessions,

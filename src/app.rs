@@ -42,8 +42,8 @@ impl Panel {
     pub fn tabs(self) -> &'static [&'static str] {
         let en = crate::i18n::en();
         match self {
-            Panel::Sessions if en => &["Summary", "Activity", "Processes", "Chat"],
-            Panel::Sessions => &["Resumo", "Atividade", "Processos", "Chat"],
+            Panel::Sessions if en => &["Summary", "Activity", "Processes", "Chat", "Resources"],
+            Panel::Sessions => &["Resumo", "Atividade", "Processos", "Chat", "Recursos"],
             Panel::Agents if en => &["Summary", "Activity"],
             Panel::Agents => &["Resumo", "Atividade"],
             Panel::Tasks if en => &["Output", "Details"],

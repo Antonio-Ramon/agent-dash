@@ -181,10 +181,12 @@ pub struct SessionInfo {
 }
 
 /// Recursos da máquina, para o card Recursos.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Resources {
-    /// Uso global de CPU, 0–100.
+    /// Uso global de CPU (média dos núcleos), 0–100.
     pub cpu: f32,
+    /// Uso de cada CPU lógica, 0–100.
+    pub cores: Vec<f32>,
     pub mem_used: u64,
     pub mem_total: u64,
     pub swap_used: u64,

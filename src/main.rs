@@ -173,6 +173,8 @@ fn frame(size: &str) -> anyhow::Result<()> {
         ("uso de volta a todos", vec![KeyCode::Char('v')]),
         ("agentes (tudo)", vec![KeyCode::Char('2'), KeyCode::Char('a')]),
         ("sessão > processos", vec![KeyCode::Char('1'), KeyCode::Char(']'), KeyCode::Char(']')]),
+        ("sessão > recursos", vec![KeyCode::Char(']'), KeyCode::Char(']')]),
+        ("sessão > processos de novo", vec![KeyCode::Char('['), KeyCode::Char('[')]),
         ("ajuda", vec![KeyCode::Char('?')]),
         // Segundo agente da lista (Antigravity), primeiro modelo, prompt "teste".
         ("nova instância", vec![KeyCode::Esc, KeyCode::Char('['), KeyCode::Char('n'), KeyCode::Tab, KeyCode::Right, KeyCode::Tab, KeyCode::Right, KeyCode::Tab, KeyCode::Tab, KeyCode::Tab, KeyCode::Char('t'), KeyCode::Char('e'), KeyCode::Char('s'), KeyCode::Char('t'), KeyCode::Char('e')]),

@@ -907,36 +907,138 @@ fn fmt_uptime(s: u64) -> String {
     if d > 0 { format!("{d}d {h:02}:{m:02}") } else { format!("{h:02}:{m:02}") }
 }
 
-/// Card só de leitura (não recebe foco): CPU, RAM, swap, rede e uptime.
+fn load_color(pct: f64) -> Color {
+    if pct >= 85.0 {
+        Color::Red
+    } else if pct >= 60.0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    }
+}
+
+/// Barra vertical de `rows` linhas, de cima para baixo, com 8 níveis por linha.
+fn vbar(pct: f64, rows: usize) -> Vec<char> {
+    const B: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let level = ((pct.clamp(0.0, 100.0) / 100.0 * (rows * 8) as f64).round() as usize).max(1);
+    (0..rows).rev().map(|b| B[level.saturating_sub(b * 8).min(8)]).collect()
+}
+
+/// Card só de leitura (não recebe foco): uma barra vertical por CPU lógica,
+/// RAM e swap; rede no rodapé e uptime no título.
 fn draw_resources(f: &mut Frame, area: Rect, app: &App) {
+    const BAR_ROWS: usize = 2;
+    // À direita das CPUs: " RR SS" (RAM e swap).
+    const SIDE: usize = 6;
     let r = &app.snap.res;
-    let block = panel_block(t("Recursos", "Resources").to_string(), false);
-    let w = block.inner(area).width as usize;
-    // Rótulo, barra que ocupa o que sobrar e valor à direita.
-    let meter = |label: &str, pct: f64, val: String| -> Line<'static> {
-        let color = if pct >= 85.0 { Color::Red } else if pct >= 60.0 { Color::Yellow } else { Color::Green };
-        let bar_w = w.saturating_sub(5 + 1 + val.chars().count());
-        let fill = ((pct / 100.0 * bar_w as f64).round() as usize).min(bar_w);
-        Line::from(vec![
-            Span::styled(format!("{label:<5}"), Style::new().fg(DIM)),
-            Span::styled("█".repeat(fill), Style::new().fg(color)),
-            Span::styled("░".repeat(bar_w - fill), Style::new().fg(DIM)),
-            Span::styled(format!(" {val}"), Style::new().fg(color)),
-        ])
-    };
-    let pct = |used: u64, total: u64| if total == 0 { 0.0 } else { used as f64 * 100.0 / total as f64 };
-    let lines = vec![
-        meter("CPU", r.cpu as f64, format!("{:>3.0}%", r.cpu)),
-        meter("RAM", pct(r.mem_used, r.mem_total), format!("{}/{}G", fmt_gb(r.mem_used), fmt_gb(r.mem_total))),
-        meter("SWAP", pct(r.swap_used, r.swap_total), format!("{}/{}G", fmt_gb(r.swap_used), fmt_gb(r.swap_total))),
-        Line::from(vec![
-            Span::styled("NET/s", Style::new().fg(DIM)),
+    let dim = Style::new().fg(DIM);
+    let block = panel_block(t("Recursos", "Resources").to_string(), false)
+        .title_top(Line::from(Span::styled(format!("up {}", fmt_uptime(r.uptime)), dim)).right_aligned())
+        .title_bottom(Line::from(vec![
+            Span::styled("NET ", dim),
             Span::styled(format!("↓{} ", fmt_rate(r.net_rx)), Style::new().fg(Color::Green)),
             Span::styled(format!("↑{}", fmt_rate(r.net_tx)), Style::new().fg(Color::Magenta)),
-        ]),
-        Line::from(vec![Span::styled("UP   ", Style::new().fg(DIM)), Span::raw(fmt_uptime(r.uptime))]),
-    ];
-    f.render_widget(Paragraph::new(lines).block(block), area);
+        ]));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let avail = (inner.width as usize).saturating_sub(SIDE).max(1);
+    // Mais CPUs que colunas: cada coluna vira a média de um grupo vizinho.
+    let per = r.cores.len().div_ceil(avail).max(1);
+    let cols: Vec<f64> = r.cores.chunks(per).map(|c| c.iter().sum::<f32>() as f64 / c.len() as f64).collect();
+    // Sobrando espaço, barra de 2 colunas com 1 de respiro.
+    let (bw, gap) = if cols.len() * 3 <= avail { (2, 1) } else { (1, 0) };
+    let pct = |used: u64, total: u64| if total == 0 { 0.0 } else { used as f64 * 100.0 / total as f64 };
+    let (ram, swap) = (pct(r.mem_used, r.mem_total), pct(r.swap_used, r.swap_total));
+    let bars: Vec<(Vec<char>, Color)> = cols.iter().map(|&c| (vbar(c, BAR_ROWS), load_color(c))).collect();
+    let (ram_bar, swap_bar) = (vbar(ram, BAR_ROWS), vbar(swap, BAR_ROWS));
+    let mut lines = Vec::new();
+    for row in 0..BAR_ROWS {
+        let mut spans: Vec<Span> = bars
+            .iter()
+            .map(|(b, color)| Span::styled(format!("{}{}", b[row].to_string().repeat(bw), " ".repeat(gap)), Style::new().fg(*color)))
+            .collect();
+        spans.push(Span::raw(" ".repeat(avail.saturating_sub(cols.len() * (bw + gap)) + 1)));
+        spans.push(Span::styled(ram_bar[row].to_string().repeat(2), Style::new().fg(load_color(ram))));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(swap_bar[row].to_string().repeat(2), Style::new().fg(load_color(swap))));
+        lines.push(Line::from(spans));
+    }
+    let cpu = r.cpu as f64;
+    lines.push(Line::from(vec![
+        Span::styled(fit(&format!("CPU {cpu:.0}% ×{}", r.cores.len()), avail), Style::new().fg(load_color(cpu))),
+        Span::styled(" RM SW", dim),
+    ]));
+    let text = |label: &str, used: u64, total: u64, p: f64| {
+        Line::from(vec![
+            Span::styled(format!("{label:<5}"), dim),
+            Span::styled(format!("{}/{}G {p:.0}%", fmt_gb(used), fmt_gb(total)), Style::new().fg(load_color(p))),
+        ])
+    };
+    lines.push(text("RAM", r.mem_used, r.mem_total, ram));
+    lines.push(text("SWAP", r.swap_used, r.swap_total, swap));
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// CPU e RAM de cada sessão viva (processo da sessão + filhos), a que mais
+/// ocupa memória primeiro. CPU é a fatia da máquina inteira, não de um núcleo.
+fn draw_session_resources(f: &mut Frame, area: Rect, app: &App, selected: &str) {
+    let res = &app.snap.res;
+    let ncpu = res.cores.len().max(1);
+    let share = |mem: u64| if res.mem_total == 0 { 0.0 } else { mem as f64 * 100.0 / res.mem_total as f64 };
+    // (sessão, CPU em % da máquina, RAM em bytes, processos)
+    let mut v: Vec<(&SessionInfo, f64, u64, usize)> = app
+        .snap
+        .sessions
+        .iter()
+        .filter(|s| s.alive)
+        .map(|s| {
+            let cpu = s.cpu + s.procs.iter().map(|p| p.cpu).sum::<f32>();
+            (s, cpu as f64 / ncpu as f64, s.mem + s.procs.iter().map(|p| p.mem).sum::<u64>(), s.procs.len() + s.pid.is_some() as usize)
+        })
+        .collect();
+    v.sort_by(|a, b| b.2.cmp(&a.2));
+    let row = |name: String, agent: String, cpu: f64, mem: u64, procs: String| {
+        Row::new(vec![
+            Cell::from(name),
+            Cell::from(agent).fg(DIM),
+            Cell::from(format!("{cpu:>5.1}%")).fg(load_color(cpu)),
+            Cell::from(format!("{:>9}", fmt_mb(mem))),
+            Cell::from(format!("{:>5.1}%", share(mem))).fg(load_color(share(mem))),
+            Cell::from(format!("{procs:>5}")),
+        ])
+    };
+    let mut rows: Vec<Row> = v
+        .iter()
+        .map(|(s, cpu, mem, n)| {
+            let r = row(s.name.clone(), s.agent.clone().unwrap_or_else(|| "Claude".into()), *cpu, *mem, n.to_string());
+            if s.session_id == selected { r.bold() } else { r }
+        })
+        .collect();
+    let (cpu_sum, mem_sum, n_sum) = v.iter().fold((0.0, 0u64, 0usize), |a, x| (a.0 + x.1, a.1 + x.2, a.2 + x.3));
+    rows.push(Row::new(vec![""]));
+    rows.push(row(tr!("Sessões ({})", "Sessions ({})", v.len()), String::new(), cpu_sum, mem_sum, n_sum.to_string()).fg(ACCENT));
+    rows.push(row(t("PC inteiro", "Whole PC").to_string(), String::new(), res.cpu as f64, res.mem_used, String::new()).fg(DIM));
+    let header = Row::new(vec![
+        t("Sessão", "Session").to_string(),
+        t("Agente", "Agent").to_string(),
+        "   CPU".to_string(),
+        "      RAM".to_string(),
+        " % RAM".to_string(),
+        "Procs".to_string(),
+    ])
+    .style(Style::new().fg(DIM));
+    let [table, note] = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(area);
+    f.render_widget(
+        Table::new(rows, [Constraint::Min(16), Constraint::Length(12), Constraint::Length(6), Constraint::Length(9), Constraint::Length(6), Constraint::Length(5)])
+            .header(header)
+            .column_spacing(2),
+        table,
+    );
+    let hint = tr!(
+        "CPU e % RAM são a fatia da máquina inteira ({ncpu} CPUs) · processo da sessão + filhos",
+        "CPU and % RAM are the share of the whole machine ({ncpu} CPUs) · session process + children"
+    );
+    f.render_widget(Paragraph::new(Span::styled(hint, Style::new().fg(DIM))), note);
 }
 
 fn draw_days(f: &mut Frame, area: Rect, app: &mut App) {
@@ -1263,6 +1365,7 @@ fn draw_session_main(f: &mut Frame, area: Rect, app: &mut App) {
             let p = if lines.is_empty() { Paragraph::new(t("Sem atividade registrada.", "No recorded activity.")) } else { Paragraph::new(lines) };
             f.render_widget(p, inner);
         }
+        4 => draw_session_resources(f, inner, app, &s.session_id),
         2 => {
             let header = Row::new(vec!["PID", t("Processo", "Process"), "CPU", "Mem", t("Comando", "Command")]).style(Style::new().fg(DIM));
             let mut rows = vec![Row::new(vec![
@@ -1651,7 +1754,7 @@ fn draw_help(f: &mut Frame) {
         k("1 2 3 4", t("ir para Sessões / Agentes / Tasks / Uso", "go to Sessions / Agents / Tasks / Usage")),
         k("Tab  h l ← →", t("painel anterior / próximo", "previous / next panel")),
         k("F2 F3 F4", t("mostrar/ocultar Agentes / Tasks / Uso (o número reexibe)", "show/hide Agents / Tasks / Usage (the digit brings it back)")),
-        k("F5", t("mostrar/ocultar Recursos (CPU, RAM, swap, rede, uptime)", "show/hide Resources (CPU, RAM, swap, net, uptime)")),
+        k("F5", t("mostrar/ocultar Recursos (CPUs, RAM, swap, rede, uptime)", "show/hide Resources (CPUs, RAM, swap, net, uptime)")),
         k("j k ↑ ↓", t("mover seleção", "move selection")),
         k("g G Home End", t("início / fim da lista", "top / bottom of the list")),
         k("[ ]", t("trocar aba do painel principal", "switch main panel tab")),
@@ -1746,6 +1849,14 @@ fn draw_help(f: &mut Frame) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn barra_vertical_enche_de_baixo_para_cima() {
+        assert_eq!(vbar(0.0, 2), [' ', '▁'], "ocioso ainda mostra a base");
+        assert_eq!(vbar(50.0, 2), [' ', '█']);
+        assert_eq!(vbar(75.0, 2), ['▄', '█']);
+        assert_eq!(vbar(250.0, 2), ['█', '█'], "acima de 100% não estoura");
+    }
 
     #[test]
     fn parte_pequena_no_topo_nao_some() {
