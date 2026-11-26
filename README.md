@@ -10,10 +10,10 @@ dentro do painel. Ver [Outros agentes](#outros-agentes-antigravity-codex).
 
 ```
  agent-dash  4 sessões (2 trabalhando) │ 1 agentes │ 0 shells 1 monitors │ hoje 99.2M tok ▂▂▃▃█▁
-┏[1] Sessões (4)━━━━━━━━━━━━━━━━━━━━━━━━━━┓╭ Sessão agent-dash-2d ─ Resumo  Atividade  Processos ─╮
-┃● agent-dash-2d     ocupada   5.7M    1m ┃│Status   ● ocupada   pid 7176 · v2.1.319               │
-┃● meu-backend-a6    shell   277.9M   13m ┃│Paralelo 0 agentes rodando · 1 task em background      │
-┃● meu-site-d9       ociosa   22.7M   25m ┃│╭ Tokens ──────────────╮╭ Ferramentas ────────────────╮│
+┏[1] Sessões (4)━━━━CPU━━━RAM━━%RAM━tokens┓╭ Sessão agent-dash-2d ─ Resumo  Atividade  Processos ─╮
+┃● agent-dash-2d   1.2% 483MB  3.0%   5.7M┃│Status   ● ocupada   pid 7176 · v2.1.319               │
+┃● meu-backend-a6  0.4% 1.1GB  7.2% 277.9M┃│Paralelo 0 agentes rodando · 1 task em background      │
+┃● meu-site-d9     0.0% 335MB  2.1%  22.7M┃│╭ Tokens ──────────────╮╭ Ferramentas ────────────────╮│
 ╭[2] Agentes (0 rodando)──────────────────╮││Cache leitura   5.4M  ││Bash   34 ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇  ││
 ╭[3] Shells/Monitors/Tasks (1 rodando)────╮││Contexto atual 196.4k ││Edit   11 ▇▇▇▇▇▇              ││
 │● monitor  erros no log do servidor  …24m │╰──────────────────────╯╰────────────────────────────╯│
@@ -74,10 +74,10 @@ depois da instalação.
 | | os quatro painéis da esquerda têm altura fixa (não mudam com a quantidade de itens); lista maior que o painel rola, e o painel em foco mostra a barra de rolagem |
 | mouse | **roda**: rola o que está sob o cursor (lista, painel principal ou chat) sem mudar foco nem seleção; no chat a roda vai para o Claude, que rola a conversa como num terminal comum; **clique**: dá foco ao painel e seleciona a linha; clique no chat entrega o teclado a ele; **arrastar no chat** seleciona o texto e copia ao soltar (`Ctrl+C` com seleção copia de novo em vez de interromper o Claude). Fora do chat, para selecionar texto segure `Shift` |
 | `j` `k` / `↑` `↓` / `g` `G` | mover seleção |
-| `[` `]` | trocar aba do painel principal (Resumo / Atividade / Processos / Chat / Recursos, Saída / Detalhes) |
+| `[` `]` | trocar aba do painel principal (Resumo / Atividade / Processos / Chat, Saída / Detalhes) |
 | `J` `K` / `PgUp` `PgDn` | rolar o painel principal (na saída de uma task, sobe a partir do fim) |
 | `Enter` | **chat dentro do painel**: entra no chat da sessão selecionada (retoma aqui uma sessão encerrada ou em background) |
-| `F12` / `Ctrl+]` | no chat: devolve o teclado ao painel (o chat continua rodando; `▣` marca sessões com chat aberto) |
+| `F12` / `Ctrl+]` | no chat: devolve o teclado ao painel (o chat continua rodando) |
 | `Shift+PgUp` / `Shift+PgDn` | no chat: rolar |
 | `Ctrl+Enter` | no chat: quebrar linha sem enviar |
 | `z` / `+` | zoom no painel principal (vale para o chat também) |
