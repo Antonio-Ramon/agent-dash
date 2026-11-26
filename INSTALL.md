@@ -171,14 +171,13 @@ Na primeira abertura o cabeçalho mostra "lendo histórico N%" enquanto o histó
 | `◐` | sessão em background parada, esperando uma resposta sua |
 | `○` | sessão encerrada (aparece com `a`) |
 | `◆` / `◇` | sessão de outro agente (Antigravity, Codex): mesmas cores do `●` / encerrada |
-| `▣` | sessão com chat aberto dentro do dashboard |
 | `⚑n` / `⚙n` | agentes / tasks rodando naquela sessão |
 | `✓` `✗` `◌` `?` | task concluída / interrompida ou com falha / monitor expirado / órfã |
 
 ## 5. Tarefas do dia a dia
 
 ### Acompanhar o consumo
-- Painel `1`: tokens de cada sessão; a aba **Resumo** detalha entrada, cache, saída e contexto atual.
+- Painel `1`: CPU, RAM e % RAM de cada sessão (fatia da máquina inteira, processo da sessão + filhos) e os tokens dela; a aba **Resumo** detalha entrada, cache, saída e contexto atual.
   Vale também para as sessões do Antigravity (os tokens aparecem depois da primeira resposta).
 - Painel `4`: tokens por dia; `↑` `↓` escolhem o dia e a direita mostra o consumo por modelo.
 - Com mais de um agente (Claude e Antigravity), as barras ficam empilhadas com uma cor por agente,

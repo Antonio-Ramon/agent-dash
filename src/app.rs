@@ -43,7 +43,7 @@ impl Panel {
         let en = crate::i18n::en();
         match self {
             Panel::Sessions if en => &["Summary", "Activity", "Processes", "Chat", "Resources"],
-            Panel::Sessions => &["Resumo", "Atividade", "Processos", "Chat", "Recursos"],
+            Panel::Sessions => &["Resumo", "Atividade", "Processos", "Chat"],
             Panel::Agents if en => &["Summary", "Activity"],
             Panel::Agents => &["Resumo", "Atividade"],
             Panel::Tasks if en => &["Output", "Details"],
@@ -2196,6 +2196,48 @@ mod tests {
             agents_total: 0,
             agents_running: 0,
             tasks_running: 0,
+        }
+    }
+
+    /// Lista de Sessões: CPU e % RAM são a fatia da máquina, o título de cada
+    /// coluna fica na borda de cima terminando junto com o valor, e painel estreito
+    /// tira colunas inteiras (idade, RAM, tokens) em vez de cortar a última.
+    #[test]
+    fn sessoes_mostram_cpu_e_ram_com_titulo_alinhado() {
+        let mut app = App::new();
+        app.snap.res = crate::model::Resources { cores: vec![0.0; 4], mem_total: 16 << 30, ..Default::default() };
+        let mut s = agent_session("abc", "C:/x", Some(1));
+        s.agent = None;
+        s.usage.tokens.input = 5_700_000;
+        s.started_at = Some(Local::now() - chrono::Duration::minutes(13));
+        s.cpu = 8.0; // 8% de um núcleo em 4 CPUs = 2% da máquina
+        s.mem = 512 << 20; // 512 MB de 16 GB = 3.1%
+        app.snap.sessions = vec![s];
+        let all = [("CPU", "2.0%"), ("RAM", "512MB"), ("%RAM", "3.1%"), ("tokens", "5.7M"), ("", "13m")];
+        // (largura da tela, mostra todas, colunas visíveis)
+        for (width, show_all, shown) in [(220, true, 5), (160, false, 4), (120, false, 2)] {
+            app.show_all = show_all;
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 30)).unwrap();
+            term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+            let buf = term.backend().buffer().clone();
+            let r = app.rects[0];
+            let line = |y: u16| (r.x..r.right()).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>();
+            let (top, row) = (line(r.y), line(r.y + 1));
+            let end = |l: &str, v: &str| l.find(v).map(|i| l[..i].chars().count() + v.chars().count());
+            let visible: Vec<_> = all.iter().filter(|(_, v)| end(&row, v).is_some()).collect();
+            assert_eq!(visible.len(), shown, "{width} colunas:
+{top}
+{row}");
+            assert_eq!(visible[0].1, "2.0%", "CPU nunca sai:
+{row}");
+            // A última coluna visível termina colada na borda direita, inteira.
+            assert_eq!(end(&row, visible[shown - 1].1), Some(r.width as usize - 1), "{width}:
+{row}");
+            for (label, value) in visible.iter().filter(|(l, _)| !l.is_empty()) {
+                assert_eq!(end(&top, label), end(&row, value), "{width}: {label} alinhado com {value}:
+{top}
+{row}");
+            }
         }
     }
 

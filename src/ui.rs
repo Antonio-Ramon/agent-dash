@@ -778,41 +778,72 @@ fn empty_hint(f: &mut Frame, area: Rect, text: &str) {
     f.render_widget(Paragraph::new(Span::styled(text.to_string(), Style::new().fg(DIM).italic())), inner);
 }
 
+/// RAM curta para a lista de sessões: 529MB, 1.2GB (sempre 5 colunas ou menos).
+fn fmt_ram(b: u64) -> String {
+    let mb = b as f64 / 1_048_576.0;
+    if mb < 999.5 { format!("{mb:.0}MB") } else { format!("{:.1}GB", mb / 1024.0) }
+}
+
 fn draw_sessions(f: &mut Frame, area: Rect, app: &mut App) {
-    let chats: Vec<String> = app.terms.iter().map(|t| t.key.clone()).collect();
+    let ncpu = app.snap.res.cores.len().max(1) as f64;
+    let mem_total = app.snap.res.mem_total.max(1) as f64;
     let list = app.sessions();
     let alive = app.snap.sessions.iter().filter(|s| s.alive).count();
-    let w = area.width.saturating_sub(4) as usize;
-    let name_w = w.saturating_sub(26).clamp(8, 30);
+    // Colunas depois do nome, cada uma com 1 espaço antes: (largura, título na borda).
+    // CPU e % RAM são a fatia da máquina inteira; tudo soma o processo da sessão e os filhos.
+    let cols = [(5, "CPU"), (5, "RAM"), (5, "%RAM"), (6, "tokens"), (6, "")];
+    // Painel estreito: sai a idade, depois a RAM em MB, depois os tokens; o nome fica com 10 ou mais.
+    let w = area.width.saturating_sub(2) as usize;
+    let mut show = [true; 5];
+    let cols_w = |show: &[bool; 5]| cols.iter().zip(show).filter(|(_, on)| **on).map(|(c, _)| c.0 + 1).sum::<usize>();
+    for i in [4, 1, 3] {
+        if 2 + 10 + cols_w(&show) <= w {
+            break;
+        }
+        show[i] = false;
+    }
+    let name_w = w.saturating_sub(2 + cols_w(&show)).max(10);
     let items: Vec<ListItem> = list
         .iter()
         .map(|s| {
             let mut extra = String::new();
-            if chats.contains(&s.session_id) {
-                extra.push_str(" ▣");
-            }
             if s.agents_running > 0 {
                 extra.push_str(&format!(" ⚑{}", s.agents_running));
             }
             if s.tasks_running > 0 {
                 extra.push_str(&format!(" ⚙{}", s.tasks_running));
             }
-            ListItem::new(Line::from(vec![
+            let extra_w = extra.chars().count().min(name_w);
+            let mut spans = vec![
                 session_dot(s),
                 Span::raw(" "),
-                Span::styled(fit(&s.name, name_w), if s.alive { Style::new() } else { Style::new().fg(DIM) }),
-                Span::styled(format!(" {:<7}", fit(status_label(s), 7)), Style::new().fg(DIM)),
-                Span::styled(
-                    // Agente cujos tokens o dashboard não lê (ou ainda sem resposta): "—".
-                    format!(
-                        "{:>7}",
-                        if s.agent.is_some() && s.usage.turns == 0 { "—".into() } else { fmt_tok(s.usage.tokens.total() + s.agents_usage.total()) }
-                    ),
-                    Style::new().fg(Color::Magenta),
-                ),
-                Span::styled(format!(" {:>5}", fmt_ago(s.usage.last_ts.or(s.started_at))), Style::new().fg(DIM)),
+                Span::styled(fit(&s.name, name_w - extra_w), if s.alive { Style::new() } else { Style::new().fg(DIM) }),
                 Span::styled(extra, Style::new().fg(Color::Yellow)),
-            ]))
+            ];
+            let mem = s.mem + s.procs.iter().map(|p| p.mem).sum::<u64>();
+            let dash = || Span::styled(format!(" {:>5}", "—"), Style::new().fg(DIM));
+            let [cpu, ram, pct] = if s.alive && mem > 0 {
+                let cpu = (s.cpu + s.procs.iter().map(|p| p.cpu).sum::<f32>()) as f64 / ncpu;
+                let pct = mem as f64 * 100.0 / mem_total;
+                [
+                    Span::styled(format!(" {cpu:>4.1}%"), Style::new().fg(load_color(cpu))),
+                    Span::raw(format!(" {:>5}", fmt_ram(mem))),
+                    Span::styled(format!(" {pct:>4.1}%"), Style::new().fg(load_color(pct))),
+                ]
+            } else {
+                [dash(), dash(), dash()]
+            };
+            let tok = Span::styled(
+                // Agente cujos tokens o dashboard não lê (ou ainda sem resposta): "—".
+                format!(
+                    " {:>6}",
+                    if s.agent.is_some() && s.usage.turns == 0 { "—".into() } else { fmt_tok(s.usage.tokens.total() + s.agents_usage.total()) }
+                ),
+                Style::new().fg(Color::Magenta),
+            );
+            let age = Span::styled(format!(" {:>6}", fmt_ago(s.usage.last_ts.or(s.started_at))), Style::new().fg(DIM));
+            spans.extend([cpu, ram, pct, tok, age].into_iter().zip(show).filter_map(|(c, on)| on.then_some(c)));
+            ListItem::new(Line::from(spans))
         })
         .collect();
     let n = items.len();
@@ -820,7 +851,23 @@ fn draw_sessions(f: &mut Frame, area: Rect, app: &mut App) {
         true => tr!("[1] Sessões ({alive} vivas, {n} em 24h)", "[1] Sessions ({alive} alive, {n} in 24h)"),
         false => tr!("[1] Sessões ({alive})", "[1] Sessions ({alive})"),
     };
+    // Títulos das colunas na borda de cima, terminando junto com o valor. O título
+    // do card encurta para não cobrir o primeiro (CPU, que nunca sai).
+    let x0 = area.x + 1 + 2 + name_w as u16;
+    let max_title = (x0 + cols[0].0 as u16 + 1 - cols[0].1.len() as u16).saturating_sub(area.x + 2) as usize;
+    let title = if title.chars().count() > max_title { fit(&title, max_title) } else { title };
     draw_list(f, area, app, Panel::Sessions, items, title);
+    let mut x = x0;
+    for ((cw, label), on) in cols.into_iter().zip(show) {
+        if !on {
+            continue;
+        }
+        x += cw as u16 + 1;
+        let lx = x.saturating_sub(label.len() as u16);
+        if !label.is_empty() && x < area.right() {
+            f.render_widget(Paragraph::new(Span::styled(label, Style::new().fg(DIM))), Rect { x: lx, y: area.y, width: label.len() as u16, height: 1 });
+        }
+    }
     if n == 0 {
         empty_hint(f, area, t("nenhuma sessão do Claude Code rodando", "no Claude Code session running"));
     }
@@ -1032,68 +1079,6 @@ fn draw_resources(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(swap_txt, Style::new().fg(load_color(swap))),
     ]));
     f.render_widget(Paragraph::new(lines), inner);
-}
-
-/// CPU e RAM de cada sessão viva (processo da sessão + filhos), a que mais
-/// ocupa memória primeiro. CPU é a fatia da máquina inteira, não de um núcleo.
-fn draw_session_resources(f: &mut Frame, area: Rect, app: &App, selected: &str) {
-    let res = &app.snap.res;
-    let ncpu = res.cores.len().max(1);
-    let share = |mem: u64| if res.mem_total == 0 { 0.0 } else { mem as f64 * 100.0 / res.mem_total as f64 };
-    // (sessão, CPU em % da máquina, RAM em bytes, processos)
-    let mut v: Vec<(&SessionInfo, f64, u64, usize)> = app
-        .snap
-        .sessions
-        .iter()
-        .filter(|s| s.alive)
-        .map(|s| {
-            let cpu = s.cpu + s.procs.iter().map(|p| p.cpu).sum::<f32>();
-            (s, cpu as f64 / ncpu as f64, s.mem + s.procs.iter().map(|p| p.mem).sum::<u64>(), s.procs.len() + s.pid.is_some() as usize)
-        })
-        .collect();
-    v.sort_by(|a, b| b.2.cmp(&a.2));
-    let row = |name: String, agent: String, cpu: f64, mem: u64, procs: String| {
-        Row::new(vec![
-            Cell::from(name),
-            Cell::from(agent).fg(DIM),
-            Cell::from(format!("{cpu:>5.1}%")).fg(load_color(cpu)),
-            Cell::from(format!("{:>9}", fmt_mb(mem))),
-            Cell::from(format!("{:>5.1}%", share(mem))).fg(load_color(share(mem))),
-            Cell::from(format!("{procs:>5}")),
-        ])
-    };
-    let mut rows: Vec<Row> = v
-        .iter()
-        .map(|(s, cpu, mem, n)| {
-            let r = row(s.name.clone(), s.agent.clone().unwrap_or_else(|| "Claude".into()), *cpu, *mem, n.to_string());
-            if s.session_id == selected { r.bold() } else { r }
-        })
-        .collect();
-    let (cpu_sum, mem_sum, n_sum) = v.iter().fold((0.0, 0u64, 0usize), |a, x| (a.0 + x.1, a.1 + x.2, a.2 + x.3));
-    rows.push(Row::new(vec![""]));
-    rows.push(row(tr!("Sessões ({})", "Sessions ({})", v.len()), String::new(), cpu_sum, mem_sum, n_sum.to_string()).fg(ACCENT));
-    rows.push(row(t("PC inteiro", "Whole PC").to_string(), String::new(), res.cpu as f64, res.mem_used, String::new()).fg(DIM));
-    let header = Row::new(vec![
-        t("Sessão", "Session").to_string(),
-        t("Agente", "Agent").to_string(),
-        "   CPU".to_string(),
-        "      RAM".to_string(),
-        " % RAM".to_string(),
-        "Procs".to_string(),
-    ])
-    .style(Style::new().fg(DIM));
-    let [table, note] = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(area);
-    f.render_widget(
-        Table::new(rows, [Constraint::Min(16), Constraint::Length(12), Constraint::Length(6), Constraint::Length(9), Constraint::Length(6), Constraint::Length(5)])
-            .header(header)
-            .column_spacing(2),
-        table,
-    );
-    let hint = tr!(
-        "CPU e % RAM são a fatia da máquina inteira ({ncpu} CPUs) · processo da sessão + filhos",
-        "CPU and % RAM are the share of the whole machine ({ncpu} CPUs) · session process + children"
-    );
-    f.render_widget(Paragraph::new(Span::styled(hint, Style::new().fg(DIM))), note);
 }
 
 fn draw_days(f: &mut Frame, area: Rect, app: &mut App) {
@@ -1420,7 +1405,6 @@ fn draw_session_main(f: &mut Frame, area: Rect, app: &mut App) {
             let p = if lines.is_empty() { Paragraph::new(t("Sem atividade registrada.", "No recorded activity.")) } else { Paragraph::new(lines) };
             f.render_widget(p, inner);
         }
-        4 => draw_session_resources(f, inner, app, &s.session_id),
         2 => {
             let header = Row::new(vec!["PID", t("Processo", "Process"), "CPU", "Mem", t("Comando", "Command")]).style(Style::new().fg(DIM));
             let mut rows = vec![Row::new(vec![
@@ -1819,7 +1803,7 @@ fn draw_help(f: &mut Frame) {
         k("Esc", t("sair do zoom / fechar ajuda", "leave zoom / close help")),
         Line::raw(""),
         sec(t("Chat dentro do painel", "Chat inside the panel")),
-        k("Enter", t("sessão: abrir/entrar no chat aqui (▣ = chat aberto)", "session: open/enter the chat here (▣ = chat open)")),
+        k("Enter", t("sessão: abrir/entrar no chat aqui", "session: open/enter the chat here")),
         k("F12  Ctrl+]", t("devolver o teclado ao painel (o chat segue rodando)", "give the keyboard back to the panel (chat keeps running)")),
         k("Shift+PgUp/Dn", t("rolar o chat", "scroll the chat")),
         k(t("arrastar", "drag"), t("selecionar texto do chat e copiar (Ctrl+C copia de novo)", "select chat text and copy it (Ctrl+C copies again)")),
